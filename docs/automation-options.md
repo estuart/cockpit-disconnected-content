@@ -23,8 +23,12 @@ download and review a new pair.
 Use an existing Ansible Core 2.16+ control node with SSH access to the clients.
 Only `ansible.builtin` modules are used. Clients need compatible RHEL major
 version and architecture, Python with `python3-dnf`, administrative become access,
-independently provisioned and verified Red Hat RPM public keys, and access to
-the published URLs. The playbooks do not enroll signing keys. The built-in DNF4
+access to the published URLs, and reviewed RPM signing keys. For repositories
+with approved keys, the configuration playbook installs embedded public-key files
+and verifies their full fingerprints before RPM enrollment. This is a
+client-wide trust change; review it before running. Reviewed-key enrollment also
+requires `gnupg2` on clients; provision it from approved installation media first.
+Repositories without approved keys require independently provisioned Red Hat public keys. The built-in DNF4
 backend is selected explicitly for RHEL's Python DNF bindings.
 
 Edit `inventory.ini` and start with a canary host. Add `--ask-become-pass` when
@@ -38,14 +42,16 @@ ansible-playbook -i inventory.ini security-updates.yml --limit client.example.or
 ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org
 ```
 
-Configuration check mode previews the file change and skips metadata refresh;
+Configuration check mode previews repository and public-key files, and skips key
+enrollment and metadata refresh;
 apply configuration before previewing security updates. Security check mode can
 refresh DNF cache metadata but does not install package updates. Review the
 transaction before applying during the maintenance window, then expand the host
 limit deliberately. Both playbooks process one host at a time and stop the play
 on failure. They do not reboot hosts; package scripts can restart services.
 
-The security playbook checks the installed file's SHA-256 and rejects missing,
+The security playbook checks the repository file and reviewed public-key files
+against their pinned SHA-256 checksums and rejects missing,
 modified, or symlinked configuration before the transaction. Every selected
 repository must contain `updateinfo` metadata, otherwise it stops with an
 explanation. `security: true`, `state: latest`, and `update_only: true` select

@@ -290,3 +290,47 @@ setup tab.
 This validates the disconnected UI workflow against a real small RHEL import and
 publication. It does not establish client-side configuration/update completion,
 remote reachability from every client network, or broad BaseOS/AppStream coverage.
+
+## Reviewed repository signing keys
+
+Version 0.9.0 adds explicit public-key review and repository-scoped approval,
+key-pinned publication, and client key setup.
+
+- Passed 127 backend tests covering key review and confirmation binding, expired
+  reviews, role and active-job restrictions, malformed/revoked/expired keys,
+  key-file limits and symlinks, repository scoping, pinned publication content,
+  retained signature diagnostics, and generated automation boundaries.
+- Passed the existing ten connected and nineteen disconnected browser workflow
+  cases, plus signing-key review, explicit fingerprint approval, draft review
+  invalidation, exact playbook downloads, and narrow-screen layouts.
+- On isolated RHEL 10, validated a real third-party RPM bundle in temporary state.
+  Missing-key validation failed with a structured diagnostic; approving the matching
+  public key allowed import and publication-copy verification. The host-wide RPM
+  keyring and live publication were unchanged by this isolated validation.
+- Ran the generated playbooks with Ansible Core 2.16.16 in a disposable RHEL 10
+  client container with no network interfaces other than loopback. Provisioned
+  signed prerequisites offline and served the verified repository metadata locally.
+  Configuration check mode preserved files and trust; apply verified the full
+  fingerprint, enrolled the key, and refreshed DNF metadata. A second apply was
+  idempotent. Substituted key files and wrong expected fingerprints were rejected;
+  the latter failed before enrollment. Missing updateinfo stopped security updates.
+- The enrollment tasks inspect only the matching RPM key ID and compare its full
+  fingerprint, avoiding Ansible 2.16's whole-keyring parsing failure with an
+  unrelated newer OpenPGP key. A private GnuPG home supports clean client systems.
+- Existing publications using the standard Red Hat key file retain their exact
+  generated repository configuration and remain downloadable after upgrading.
+
+The third-party repository lacks updateinfo. This test validates key trust,
+repository setup, and metadata access; it does not demonstrate a security-update
+transaction or install the third-party application. Production key lifecycle,
+revocation feeds, signed transfer manifests, and FIPS validation remain separate
+release work.
+
+Both version 0.9.0 RPMs were installed on the isolated publishing test host and
+the main RPM on the connected build host. Installed helper and frontend hashes
+matched the source build. Configuration, the current publication, existing RPM
+trust, SELinux enforcement, and absent default routes were preserved. A public
+key was staged in the transfer inbox for manual GUI review; live key approval
+and advancement of the current publication were left to the operator. The live
+Cockpit browser URL was blocked by browser tool policy, so the new GUI was checked
+with local browser fixtures rather than a live authenticated browser session.

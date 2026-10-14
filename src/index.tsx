@@ -9,6 +9,7 @@ type Repo = { id: string; name: string; enabled: boolean };
 type Plan = { packages: number; package_bytes: number; required_free: number;
   free_bytes: number; within_budget: boolean; enough_space: boolean };
 type Job = { id: string; operation: string; status: string; stage: string; created: string;
+  signature_failure?: { code: string; message: string; repository_id: string; diagnostics: string };
   started?: string; finished?: string; updated?: string; bundle_name?: string; incoming_dir?: string;
   profile?: { repositories: string[]; max_gib: number };
   snapshot_id?: string; plan?: Plan; result?: { path?: string; sha256?: string; bytes?: number;
@@ -16,7 +17,10 @@ type Job = { id: string; operation: string; status: string; stage: string; creat
   source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
 type Publication = { snapshot_id: string; published_at: string; verified_at: string; base_url: string;
   job_id: string; config_url: string; client_config: string; bytes: number; os: { major: string; arch: string };
-  repositories: Record<string, { packages: number; metadata_types: string[] }> };
+  repositories: Record<string, { packages: number; metadata_types: string[]; signing_keys?: SigningKey[] }> };
+type SigningKey = { fingerprint: string; fingerprints: string[]; user_ids: string[]; expires: string | null;
+  sha256: string; public_key: string; approved_at?: string; source?: string };
+type KeyReview = SigningKey & { review_id: string; repository_id: string; reviewed_at: string };
 type Automation = { snapshot_id: string; has_updateinfo: boolean; files: Record<string, string> };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
   imported?: boolean; source_created?: string; verified_at?: string;
@@ -42,6 +46,7 @@ type State = { version: string; role: string; os: { name: string; major: string;
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
   jobs: Job[]; snapshots: Snapshot[]; incoming: IncomingBundle[];
+  signing_key_files?: string[]; trusted_signing_keys?: { repository_id: string; signing_keys: SigningKey[] }[];
   import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
   publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null;
     availability: { state: 'not_published' | 'available' | 'unavailable'; reason: string } } | null;
@@ -70,6 +75,81 @@ function downloadFile(content: string, filename: string) {
   const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
   const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function clientKeys(publication: Publication) {
+  return [...new Map(Object.values(publication.repositories).flatMap(repo => repo.signing_keys ?? [])
+    .map(key => [key.fingerprint, key])).values()];
+}
+function keyPath(key: SigningKey) { return `/etc/pki/rpm-gpg/DISCONNECTED-CONTENT-${key.fingerprint}.asc`; }
+
+function SigningKeys({ state, disabled, onTrusted }: { state: State; disabled: boolean; onTrusted: () => Promise<unknown> }) {
+  const failure = state.jobs.find(job => job.operation === 'import')?.signature_failure;
+  const [repository, setRepository] = useState(failure?.repository_id ?? '');
+  const [file, setFile] = useState('');
+  const [armor, setArmor] = useState('');
+  const [review, setReview] = useState<KeyReview>();
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const resetReview = () => { setReview(undefined); setConfirmed(false); setNotice(''); };
+  const act = async (action: () => Promise<void>) => {
+    setBusy(true); setError('');
+    try { await action(); } catch (error) { setError(errorText(error)); } finally { setBusy(false); }
+  };
+  return <>
+    <Card><CardTitle>Review and approve repository signing keys</CardTitle><CardBody>
+      <p>Select a public key from the saved transfer folder, choose a public-key file on your computer, or paste its ASCII-armored contents. Review its full fingerprint against a trusted source before approval.</p>
+      <p>Approval applies to this repository inside Disconnected Content. Keys are pinned to successful imports and carried into publication and client setup. The extension does not add them to this host's system-wide RPM keyring.</p>
+      {error && <Alert variant="danger" isInline title="Signing key action failed">{error}</Alert>}
+      {notice && <Alert variant="success" isInline title={notice} />}
+      <div className="dc-key-form"><label htmlFor="key-repository">Repository ID</label>
+        <TextInput id="key-repository" value={repository} isDisabled={disabled || busy} placeholder="example-vendor-repo"
+          onChange={(_, value) => { setRepository(value); resetReview(); }} />
+        <label htmlFor="host-key-file">Public key in saved transfer folder</label>
+        <select id="host-key-file" value={file} disabled={disabled || busy} onChange={event => {
+          setFile(event.target.value); setArmor(''); resetReview();
+        }}><option value="">Choose a file or provide a key below</option>{state.signing_key_files?.map(name => <option key={name}>{name}</option>)}</select>
+        <label htmlFor="upload-key-file">Public key on your computer</label>
+        <input id="upload-key-file" type="file" accept=".asc,.key,.pub" disabled={disabled || busy}
+          onChange={event => { const selected = event.target.files?.[0]; resetReview(); setFile(''); setArmor('');
+            if (selected) void act(async () => { if (selected.size > 65536) throw new Error('Public keys must be at most 64 KiB.'); setArmor(await selected.text()); }); }} />
+        <label htmlFor="public-key-armor">ASCII-armored public key</label>
+        <textarea id="public-key-armor" rows={6} value={armor} disabled={disabled || busy || Boolean(file)}
+          placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----" onChange={event => { setArmor(event.target.value); resetReview(); }} />
+      </div>
+      <Button isDisabled={disabled || busy || !repository.trim() || (!file && !armor.trim())} onClick={() => { void act(async () => {
+        resetReview(); setReview(await call<KeyReview>(['review-signing-key'], { repository_id: repository, ...(file ? { key_file: file } : { public_key: armor }) }));
+      }); }}>Review public key</Button>
+      {review && <section className="dc-key-review" aria-label="Public signing key review">
+        <Title headingLevel="h2" size="lg">Confirm the signing key</Title>
+        <p>Repository: <strong>{review.repository_id}</strong></p>
+        <p>Identity: {review.user_ids.join(' · ') || 'No user ID'}</p>
+        <p>Full fingerprint: <code>{review.fingerprint}</code></p>
+        <p>Expires: {review.expires ? <Timestamp value={review.expires} /> : 'No expiration recorded'}</p>
+        <p>Key file SHA-256: <code>{review.sha256}</code></p>
+        <Alert variant="warning" isInline title="Verify the key's identity independently">
+          A key supplied alongside a bundle does not establish who signed it. Compare the full fingerprint with an approved vendor source or your organization's trusted record.</Alert>
+        <Checkbox id="confirm-signing-key" isChecked={confirmed} isDisabled={disabled || busy}
+          label="I verified the full fingerprint against a trusted source and approve this key for this repository."
+          onChange={(_, checked) => setConfirmed(checked)} />
+        <Button isDisabled={disabled || busy || !confirmed} onClick={() => { void act(async () => {
+          await call(['trust-signing-key'], { review_id: review.review_id, fingerprint: review.fingerprint, confirmed: true });
+          setReview(undefined); setConfirmed(false); setArmor(''); setFile('');
+          await onTrusted(); setNotice('Signing key approved. Return to Incoming bundles and retry the import.');
+        }); }}>Approve signing key</Button>
+      </section>}
+    </CardBody></Card>
+    <Card><CardTitle>Approved repository signing keys</CardTitle><CardBody>
+      {!state.trusted_signing_keys?.length && <p>No additional repository keys have been approved. Repositories without an approved key set use the host's existing RPM trust.</p>}
+      {state.trusted_signing_keys?.map(repo => <div key={repo.repository_id}><strong>{repo.repository_id}</strong>
+        {repo.signing_keys.map(key => <div className="dc-key-review" key={key.fingerprint}><p>{key.user_ids.join(' · ')}</p>
+          <p><code>{key.fingerprint}</code></p><p>Approved {key.approved_at ? <Timestamp value={key.approved_at} /> : 'Unknown'} · Expires {key.expires ? <Timestamp value={key.expires} /> : 'No expiration recorded'}</p>
+          <Button variant="secondary" onClick={() => downloadFile(key.public_key, `${key.fingerprint}.asc`)}>Download public key</Button>
+        </div>)}</div>)}
+    </CardBody></Card>
+  </>;
 }
 
 function ClientAutomation({ publication }: { publication: Publication }) {
@@ -188,6 +268,7 @@ function DisconnectedDashboard({ state, busy, sourceDraft, publicDraft, onTab, o
           {publishing ? phase === 'publisher_setup' ? 'Review publisher setup' : phase === 'server_url' ? 'Set server URL' : 'Review publication' :
             phase === 'clients' ? 'Configure clients' : phase === 'source' ? 'Choose transfer folder' : phase === 'waiting' ? 'Open transfer inbox' : phase === 'import_policy' ? 'Review import requirements' : 'Review incoming bundles'}</Button>
           {phase === 'failed' && <Button variant="secondary" onClick={() => onTab('jobs')}>View failed attempt</Button>}
+          {attention?.signature_failure?.code === 'missing_key' && <Button variant="secondary" onClick={() => onTab('keys')}>Review signing keys</Button>}
           {current && phase !== 'clients' && <Button variant="secondary" onClick={() => onTab('clients')}>Client setup for recorded publication</Button>}
           {phase === 'clients' && <Button variant="secondary" onClick={() => onTab('incoming')}>Review incoming bundles</Button>}
         </div>
@@ -519,6 +600,7 @@ function App() {
         <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
         {!disconnected && <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />}
         {disconnected && <Tab eventKey="incoming" title={<TabTitleText>Incoming bundles</TabTitleText>} />}
+        {disconnected && <Tab eventKey="keys" title={<TabTitleText>Signing keys</TabTitleText>} />}
         {disconnected && <Tab eventKey="publish" title={<TabTitleText>Publish content</TabTitleText>} />}
         {disconnected && <Tab eventKey="clients" title={<TabTitleText>Client setup</TabTitleText>} />}
         <Tab eventKey="snapshots" title={<TabTitleText>{disconnected ? 'Snapshots' : 'Snapshots & exports'} <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
@@ -563,11 +645,24 @@ function App() {
             <p>Transfer bundles carry checksums, without a cryptographic signature. {disconnected ? 'Use Publish content to serve validated snapshots and obtain client configuration. Client configuration and updates are explicit administrator actions.' : 'Transfer a verified bundle to a disconnected host for import and publication.'}</p>
           </Alert>
         </>}
+        {tab === 'keys' && disconnected && <SigningKeys state={state} disabled={disabled} onTrusted={refresh} />}
         {tab === 'incoming' && disconnected && <>
+          {state.jobs.find(job => job.operation === 'import')?.signature_failure && (() => {
+            const failure = state.jobs.find(job => job.operation === 'import')!.signature_failure!;
+            return <Alert variant="danger" isInline title={failure.code === 'missing_key' ? 'Import needs a signing key' : 'RPM signature verification needs attention'}>
+              <p><strong>{failure.repository_id}</strong>: {failure.message}</p>
+              <details><summary>RPM verification diagnostic</summary><pre className="dc-config">{failure.diagnostics}</pre></details>
+              <Button variant="secondary" isDisabled={disabled} onClick={() => setTab('keys')}>Review signing keys</Button>
+            </Alert>;
+          })()}
           <Alert variant={state.capabilities.allow_unsigned_imports ? 'warning' : 'info'} isInline
             title={state.capabilities.allow_unsigned_imports ? 'Unsigned prototype imports enabled by the administrator' : 'Unsigned prototype imports are disabled'}>
             <p>Checksums verify integrity, not provenance. Every imported RPM is independently checked against the host's trusted signing keys.</p>
           </Alert>
+          <Card><CardTitle>Repository signing keys</CardTitle><CardBody>
+            <p>For third-party or internal repositories, approve their public signing keys before importing. Invalid signatures and unsigned RPMs remain blocked.</p>
+            <Button variant="secondary" onClick={() => setTab('keys')}>Review signing keys</Button>
+          </CardBody></Card>
           <Card><CardTitle>Transfer inbox</CardTitle><CardBody>
             <Title headingLevel="h2" size="lg">1. Choose a bundle source</Title>
             <p>Browse to a transfer folder on this disconnected host or choose a mounted drive. The app scans the selected folder only; it does not search subdirectories.</p>
@@ -675,7 +770,20 @@ function App() {
               <Button variant="secondary" onClick={() => { void act(() => navigator.clipboard.writeText(state.publication!.current!.client_config), 'Repository configuration copied'); }}>Copy .repo contents</Button></div>
             <pre className="dc-config" aria-label="Client repository configuration">{state.publication.current.client_config}</pre>
             <Title headingLevel="h2" size="lg">Configure and check client hosts</Title>
-            <p>Review the downloaded file, install it, then refresh metadata and preview security updates. These commands select only the published repositories. Clients need independently trusted Red Hat RPM keys.</p>
+            {clientKeys(state.publication.current).length > 0 && <section aria-label="Published signing keys">
+              <Title headingLevel="h2" size="lg">Reviewed public signing keys</Title>
+              <p>The .repo file references these keys at local client paths. Download and verify them before installing the repository file, or use the configuration playbook to install the embedded keys with full fingerprint checks. Client RPM key enrollment changes the client's system-wide trust.</p>
+              {clientKeys(state.publication.current).map(key => <div className="dc-key-review" key={key.fingerprint}>
+                <p>{key.user_ids.join(' · ')} · <code>{key.fingerprint}</code></p>
+                <p>Client path: <code>{keyPath(key)}</code></p>
+                <p>Published URL: <code>{`${state.publication!.current!.base_url}/disconnected-content/snapshots/${state.publication!.current!.snapshot_id}/keys/${key.fingerprint}.asc`}</code></p>
+                <p>SHA-256: <code>{key.sha256}</code></p>
+                <Button variant="secondary" onClick={() => downloadFile(key.public_key, `${key.fingerprint}.asc`)}>Download public key</Button>
+              </div>)}
+              <pre className="dc-config" aria-label="Client signing key commands">{clientKeys(state.publication.current).map(key =>
+                `# Verify fingerprint against your approved record: ${key.fingerprint}\ncurl --fail --output '${key.fingerprint}.asc' '${state.publication!.current!.base_url}/disconnected-content/snapshots/${state.publication!.current!.snapshot_id}/keys/${key.fingerprint}.asc'\necho '${key.sha256}  ${key.fingerprint}.asc' | sha256sum --check\ngpg2 --show-keys --with-fingerprint '${key.fingerprint}.asc'\n# After reviewing the full fingerprint and successful checksum check:\nsudo install -m 0644 '${key.fingerprint}.asc' '${keyPath(key)}'\nsudo rpmkeys --import '${keyPath(key)}'`).join('\n\n')}</pre>
+            </section>}
+            <p>Review the downloaded file, install the required signing keys and repository configuration, then refresh metadata and preview security updates. Repositories without reviewed keys use the client's independently trusted Red Hat RPM keys.</p>
             <pre className="dc-config" aria-label="Client setup commands">{`curl --fail --output disconnected-content.repo '${state.publication.current.config_url}'
 cat disconnected-content.repo
 sudo install -m 0644 disconnected-content.repo /etc/yum.repos.d/disconnected-content.repo

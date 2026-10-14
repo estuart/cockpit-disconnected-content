@@ -167,3 +167,19 @@ Client setup is a dedicated tab; downloads are pinned to the recorded publicatio
 No client is marked configured or updated from a download, and the workflow's
 last step remains unconfirmed. The application does not execute remote Ansible,
 store client credentials, or add AAP integration.
+
+## Repository signing-key trust
+
+Administrative key review uses a bounded ASCII-armored public certificate and an
+isolated offline GnuPG home. Review records expire after 15 minutes; approval
+rechecks the same bytes and full fingerprint while holding the engine lock and
+rejects changes during active jobs. Approved key sets are stored per repository
+in private state, separate from the host RPM database. RPM signature validation
+uses temporary key databases for explicitly approved repositories. Snapshots pin
+key material and approval evidence. Publication validates source and staged RPMs
+against those pinned keys and includes only the reviewed public keys in its web
+copy. Existing snapshot URLs cannot silently acquire different key material.
+Client configuration references local fingerprint-named keys. Downloaded Ansible
+configuration embeds exact public keys and uses full fingerprint verification before enrollment;
+security updates check the same pinned key files and keep DNF GPG verification.
+Keys from unsigned transfer bundles never become trusted automatically.

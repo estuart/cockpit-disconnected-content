@@ -28,7 +28,7 @@ import uuid
 from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -40,6 +40,93 @@ REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,180}$")
 BUNDLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.tar$")
 NS_REPO = "{http://linux.duke.edu/metadata/repo}"
 NS_COMMON = "{http://linux.duke.edu/metadata/common}"
+FINGERPRINT = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
+KEY_LIMIT = 65536
+
+
+class SignatureError(ValueError):
+    def __init__(self, code, message, diagnostics):
+        super().__init__("RPM signature validation: " + message)
+        self.details = {"code": code, "message": message, "diagnostics": diagnostics[:20000]}
+
+
+def inspect_public_key(armor):
+    """Inspect one bounded public certificate in an isolated, offline GnuPG home."""
+    if (not isinstance(armor, str) or len(armor.encode()) > KEY_LIMIT
+            or not armor.strip().startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----")
+            or not armor.strip().endswith("-----END PGP PUBLIC KEY BLOCK-----")
+            or armor.count("-----BEGIN PGP PUBLIC KEY BLOCK-----") != 1
+            or "PRIVATE KEY" in armor or "{{" in armor or "{%" in armor):
+        raise ValueError("Select one ASCII-armored public signing key, up to 64 KiB; private keys are not accepted")
+    with tempfile.TemporaryDirectory(prefix="dc-key-review-") as temporary:
+        path = Path(temporary) / "key.asc"
+        path.write_text(armor)
+        inspected = subprocess.run(["/usr/bin/gpg2", "--no-options", "--homedir", temporary,
+            "--batch", "--no-auto-key-retrieve", "--with-colons", "--fixed-list-mode",
+            "--with-fingerprint", "--show-keys", str(path)], capture_output=True, text=True, timeout=15,
+            env={**os.environ, "LC_ALL": "C"})
+    rows = [line.split(":") for line in inspected.stdout.splitlines()]
+    primary = [row for row in rows if row[0] == "pub"]
+    fingerprints = [row[9] for row in rows if row[0] == "fpr" and len(row) > 9]
+    if inspected.returncode or len(primary) != 1 or not fingerprints or not all(FINGERPRINT.fullmatch(f) for f in fingerprints):
+        raise ValueError("Cannot inspect a single valid public signing key")
+    key = primary[0]
+    expires = int(key[6]) if key[6] else None
+    if key[1] in {"r", "e", "d", "i"} or expires and expires <= time.time() or "s" not in key[11].lower():
+        raise ValueError("Signing key is expired, revoked, disabled, invalid, or lacks signing capability")
+    return {"fingerprint": fingerprints[0], "fingerprints": fingerprints,
+            "user_ids": [row[9] for row in rows if row[0] == "uid" and len(row) > 9],
+            "expires": dt.datetime.fromtimestamp(expires, dt.timezone.utc).isoformat() if expires else None,
+            "sha256": hashlib.sha256(armor.encode()).hexdigest(), "public_key": armor}
+
+
+def repository_keys(repository):
+    keys = repository.get("signing_keys", [])
+    if not isinstance(keys, list) or len(keys) > 8:
+        raise ValueError("Invalid repository signing keys")
+    for key in keys:
+        if (not isinstance(key, dict) or not FINGERPRINT.fullmatch(key.get("fingerprint", ""))
+                or not isinstance(key.get("public_key"), str) or len(key["public_key"].encode()) > KEY_LIMIT
+                or hashlib.sha256(key["public_key"].encode()).hexdigest() != key.get("sha256")
+                or "{{" in key["public_key"] or "{%" in key["public_key"]):
+            raise ValueError("Repository signing key differs from its reviewed content")
+    return keys
+
+
+def client_key_path(key):
+    return "/etc/pki/rpm-gpg/DISCONNECTED-CONTENT-" + key["fingerprint"] + ".asc"
+
+
+def publication_keys(repositories):
+    keys = {}
+    for repo in repositories.values():
+        for key in repository_keys(repo):
+            if key["fingerprint"] in keys and keys[key["fingerprint"]]["sha256"] != key["sha256"]:
+                raise ValueError("Conflicting public key content in this publication")
+            keys[key["fingerprint"]] = key
+    return list(keys.values())
+
+
+@contextlib.contextmanager
+def rpm_key_database(keys):
+    if not keys:
+        yield []
+        return
+    with tempfile.TemporaryDirectory(prefix="dc-rpm-keys-") as temporary:
+        database = Path(temporary) / "rpmdb"
+        database.mkdir()
+        args = ["--dbpath", str(database)]
+        for key in keys:
+            reviewed = inspect_public_key(key["public_key"])
+            if reviewed["fingerprint"] != key["fingerprint"] or reviewed["sha256"] != key["sha256"]:
+                raise ValueError("Pinned public signing key changed")
+            path = Path(temporary) / (key["fingerprint"] + ".asc")
+            path.write_text(key["public_key"])
+            result = subprocess.run(["/usr/bin/rpmkeys", *args, "--import", str(path)],
+                                    capture_output=True, text=True, timeout=30)
+            if result.returncode:
+                raise ValueError("RPM rejected the reviewed public key: " + result.stderr[:1000])
+        yield args
 
 
 def now():
@@ -155,7 +242,7 @@ def metadata_stream(path):
         raise ValueError(f"Unsupported primary metadata compression: {path.suffix}")
 
 
-def validate_repository(root, require_updateinfo=False, check_signatures=True, include_files=False):
+def validate_repository(root, require_updateinfo=False, check_signatures=True, include_files=False, signing_keys=None):
     root = Path(root).resolve()
     files = {"repodata/repomd.xml"}
     repomd = safe_path(root, "repodata/repomd.xml")
@@ -204,18 +291,35 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True, i
     if not count:
         raise ValueError("Repository contains no RPM packages")
     if check_signatures:
-        for offset in range(0, len(package_paths), 100):
-            checked = subprocess.run(["/usr/bin/rpmkeys", "--checksig", *package_paths[offset:offset+100]],
-                                     capture_output=True, text=True, check=False,
-                                     env={**os.environ, "LC_ALL": "C"})
-            lines = checked.stdout.splitlines()
-            if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
-                    line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
-                raise ValueError("RPM signature validation failed or signing key is not trusted")
+        with rpm_key_database(signing_keys or []) as key_args:
+            for offset in range(0, len(package_paths), 100):
+                checked = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", *package_paths[offset:offset+100]],
+                                         capture_output=True, text=True, check=False,
+                                         env={**os.environ, "LC_ALL": "C"})
+                lines = checked.stdout.splitlines()
+                if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
+                        line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
+                    diagnostic = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", "--verbose",
+                        *package_paths[offset:offset+100]], capture_output=True, text=True,
+                        env={**os.environ, "LC_ALL": "C"})
+                    details = (diagnostic.stdout + "\n" + diagnostic.stderr).strip()
+                    if re.search(r"\bBAD\b|\bNOT OK\b", details):
+                        code, message = "invalid_signature", "Package signature or digest verification failed; replace the affected package"
+                    elif "NOKEY" in details:
+                        code, message = "missing_key", "Missing signing key; review the package key ID and approve its public key before retrying"
+                    elif "NOTTRUSTED" in details:
+                        code, message = "untrusted_key", "Signature rejected by RPM trust or system crypto policy; review the diagnostic"
+                    elif not checked.returncode and any(line.endswith(": digests OK") for line in lines):
+                        code, message = "unsigned_package", "Unsigned RPM package; signed packages are required"
+                    else:
+                        code, message = "verification_failed", "Signature verification failed; review the RPM diagnostic"
+                    raise SignatureError(code, message, details)
     result = {"packages": count, "package_bytes": total, "metadata_types": sorted(metadata_types),
               "rpm_signatures_verified": check_signatures}
     if include_files:
         result["files"] = sorted(files)
+    if signing_keys:
+        result["signing_keys"] = signing_keys
     return result
 
 
@@ -246,10 +350,12 @@ def client_repo_config(origin, snapshot):
     for rid in sorted(snapshot["repositories"]):
         if not REPO_ID.fullmatch(rid):
             raise ValueError("Invalid repository identifier")
+        keys = repository_keys(snapshot["repositories"][rid])
+        key_urls = ["file://" + client_key_path(k) for k in keys]
         lines.extend([f"[dc-{rid}]", f"name=Disconnected Content - {rid}",
                       f"baseurl={origin}/disconnected-content/snapshots/{sid}/repositories/{quote(rid, safe='')}/",
                       "enabled=1", "gpgcheck=1", "repo_gpgcheck=0", "sslverify=1",
-                      "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release",
+                      "gpgkey=" + " ".join(key_urls or ["file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"]),
                       "skip_if_unavailable=0", "metadata_expire=1h", ""])
     return "\n".join(lines)
 
@@ -288,23 +394,76 @@ def client_automation(publication):
         raise ValueError("Publication configuration does not match its snapshot")
     ids = ["dc-" + rid for rid in sorted(repos)]
     advisory = all("updateinfo" in repo.get("metadata_types", []) for repo in repos.values())
+    keys = publication_keys(repos)
     common = [{"name": "Require the publication's RHEL platform and Ansible Core 2.16 or newer",
                "ansible.builtin.assert": {"that": [
                    "ansible_version.full is version('2.16', '>=')",
                    "ansible_facts['distribution'] == 'RedHat'",
                    f"ansible_facts['distribution_major_version'] == '{platform['major']}'",
                    f"ansible_facts['architecture'] == '{platform['arch']}'"],
-                   "fail_msg": "Use compatible RHEL clients and Ansible Core 2.16 or newer."}},
-              {"name": "Check for the independently provisioned Red Hat RPM public keys",
+                   "fail_msg": "Use compatible RHEL clients and Ansible Core 2.16 or newer."}}]
+    if any(not repository_keys(repo) for repo in repos.values()):
+        common += [{"name": "Check for the independently provisioned Red Hat RPM public keys",
                "ansible.builtin.stat": {"path": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"},
                "register": "dc_key"},
               {"name": "Require trusted RPM keys before using the repository",
                "ansible.builtin.assert": {"that": ["dc_key.stat.exists", "dc_key.stat.isreg | default(false)"],
                    "fail_msg": "Provision and verify Red Hat RPM keys independently before continuing."}}]
+    if keys:
+        common += [{"name": "Check gnupg2 for full fingerprint verification",
+                    "ansible.builtin.stat": {"path": "/usr/bin/gpg2"}, "register": "dc_gpg"},
+                   {"name": "Require gnupg2 before configuring reviewed repository keys",
+                    "ansible.builtin.assert": {"that": ["dc_gpg.stat.exists", "dc_gpg.stat.executable | default(false)"],
+                        "fail_msg": "Provision gnupg2 from approved installation media before enrolling signing keys."}}]
+    key_setup, key_checks = [], []
+    for key in keys:
+        path = client_key_path(key)
+        fingerprint_line = "fpr:::::::::" + key["fingerprint"] + ":"
+        gpg_args = ["/usr/bin/gpg2", "--no-options", "--homedir", "/var/lib/disconnected-content-key-review",
+                    "--batch", "--no-auto-key-retrieve",
+                    "--with-colons", "--fixed-list-mode", "--with-fingerprint", "--show-keys"]
+        key_setup.extend([
+            {"name": "Install reviewed public key " + key["fingerprint"],
+             "ansible.builtin.copy": {"dest": path, "content": key["public_key"],
+                 "owner": "root", "group": "root", "mode": "0644"}},
+            {"name": "Inspect the supplied public key without retrieving keys",
+             "ansible.builtin.command": {"argv": gpg_args + [path]},
+             "register": "dc_supplied_key", "changed_when": False, "when": "not ansible_check_mode"},
+            {"name": "Verify the publication's full signing-key fingerprint before enrollment",
+             "ansible.builtin.assert": {"that": [
+                 "dc_supplied_key.stdout_lines | select('match', '^pub:') | list | length == 1",
+                 "'" + fingerprint_line + "' in dc_supplied_key.stdout_lines"],
+                 "fail_msg": "Public key fingerprint does not match this publication; no key was enrolled."},
+             "when": "not ansible_check_mode"},
+            {"name": "Look up only the matching RPM key ID",
+             "ansible.builtin.command": {"argv": ["/usr/bin/rpm", "-q", "gpg-pubkey-" + key["fingerprint"][-8:].lower(),
+                                                  "--qf", "%{DESCRIPTION}\n"]},
+             "register": "dc_installed_key", "changed_when": False,
+             "failed_when": "dc_installed_key.rc not in [0, 1]", "when": "not ansible_check_mode"},
+            {"name": "Inspect the matching installed key's full fingerprint",
+             "ansible.builtin.command": {"argv": gpg_args + ["-"], "stdin": "{{ dc_installed_key.stdout }}"},
+             "register": "dc_installed_fingerprint", "changed_when": False,
+             "when": "not ansible_check_mode and dc_installed_key.rc == 0"},
+            {"name": "Enroll the fingerprint-verified public key if it is not already trusted",
+             "ansible.builtin.command": {"argv": ["/usr/bin/rpmkeys", "--import", path]},
+             "when": "not ansible_check_mode and (dc_installed_key.rc == 1 or '" + fingerprint_line +
+                     "' not in (dc_installed_fingerprint.stdout_lines | default([])))"}])
+        key_checks.extend([
+            {"name": "Check pinned public key " + key["fingerprint"],
+             "ansible.builtin.stat": {"path": path, "checksum_algorithm": "sha256", "follow": False},
+             "register": "dc_public_key"},
+            {"name": "Require the exact approved public key before updating",
+             "ansible.builtin.assert": {"that": ["dc_public_key.stat.isreg | default(false)",
+                 "not (dc_public_key.stat.islnk | default(false))",
+                 "dc_public_key.stat.checksum | default('') == '" + key["sha256"] + "'"],
+                 "fail_msg": "Public key is missing or changed. Run this publication's configure-repos.yml first."}}])
     configure = {"name": "Configure repositories for snapshot " + sid,
                  "hosts": "disconnected_clients", "become": True, "gather_facts": True,
-                 "serial": 1, "any_errors_fatal": True, "pre_tasks": common,
-                 "tasks": [
+                 "serial": 1, "any_errors_fatal": True, "pre_tasks": common + ([
+                     {"name": "Prepare a private GnuPG home for public-key inspection",
+                      "ansible.builtin.file": {"path": "/var/lib/disconnected-content-key-review", "state": "directory",
+                          "owner": "root", "group": "root", "mode": "0700"}}] if keys else []),
+                 "tasks": key_setup + [
                      {"name": "Install the exact pinned repository file (back up an existing file)",
                       "ansible.builtin.copy": {"dest": "/etc/yum.repos.d/disconnected-content.repo",
                           "content": config, "owner": "root", "group": "root", "mode": "0644", "backup": True}},
@@ -312,12 +471,12 @@ def client_automation(publication):
                       "ansible.builtin.command": {"argv": ["dnf", "--disablerepo=*", *["--enablerepo=" + rid for rid in ids],
                           "makecache", "--refresh"]}, "changed_when": False, "when": "not ansible_check_mode"},
                      {"name": "Explain repository check mode",
-                      "ansible.builtin.debug": {"msg": "Check mode previews the repository file only. Apply this playbook before previewing security updates; metadata refresh is skipped in check mode."},
+                      "ansible.builtin.debug": {"msg": "Check mode previews repository and public-key files. Key enrollment and metadata refresh are skipped. Apply this playbook before previewing security updates."},
                       "when": "ansible_check_mode"}]}
     security = {"name": "Apply security updates from snapshot " + sid,
                 "hosts": "disconnected_clients", "become": True, "gather_facts": True,
                 "serial": 1, "any_errors_fatal": True,
-                "pre_tasks": common + [
+                "pre_tasks": common + key_checks + [
                     {"name": "Require advisory metadata in every published repository",
                      "ansible.builtin.assert": {"that": [advisory],
                          "fail_msg": "This publication lacks updateinfo metadata. Mirror advisory metadata and publish again before using security-only updates."}},
@@ -347,7 +506,13 @@ Platform: RHEL {platform['major']} / {platform['arch']}
 
 Run manually from an Ansible Core 2.16+ control node that can SSH to the clients.
 Clients require Python 3 with python3-dnf, sudo/become access, independently
-trusted Red Hat RPM keys, and network access to the published repository URLs.
+trusted RPM keys, and network access to the published repository URLs.
+Reviewed-key enrollment also requires gnupg2 on clients; provision it from
+approved installation media before configuring repositories.
+For repositories with reviewed keys, configure-repos.yml embeds the exact public
+key material and verifies its pinned full fingerprint before RPM enrollment. Review this trust
+change before running it: RPM key enrollment applies to the client-wide keyring.
+Repositories without reviewed keys use the independently provisioned Red Hat keys.
 Only ansible.builtin modules are used; no Galaxy collection download is needed.
 
 1. Save all four downloads together. Review both playbooks and inventory.ini.
@@ -365,7 +530,7 @@ Only ansible.builtin modules are used; no Galaxy collection download is needed.
 Both playbooks run one host at a time and stop the play on a failure. Neither
 playbook reboots hosts. Package scripts may restart services during an update.
 Check mode can refresh DNF cache metadata, but does not install package updates.
-Configuration check mode does not refresh metadata or install the repository file.
+Configuration check mode does not enroll keys, refresh metadata, or install files.
 The security playbook requires the exact repository file embedded in its paired
 configuration playbook and updateinfo metadata in every selected repository.
 Security filtering depends on the advisories and packages actually mirrored;
@@ -376,6 +541,8 @@ URLs stay pinned to this snapshot. Download a new pair when advancing clients.
 Changing repositories does not undo installed updates. No automatic rollback,
 remote execution from Cockpit, credential storage, or AAP integration is included.
 """
+    instructions += "\nReviewed public signing keys:\n" + "".join(
+        key["fingerprint"] + "  SHA256 " + key["sha256"] + "\n" for key in keys)
     return {"snapshot_id": sid, "has_updateinfo": advisory, "files": {
         "configure-repos.yml": header + yaml_document([configure]),
         "security-updates.yml": header + yaml_document([security]),
@@ -469,8 +636,83 @@ class Engine:
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports"):
+        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports", "key-reviews", "trusted-keys"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
+
+    def key_files(self):
+        try:
+            directory = self.incoming_directory()
+            return sorted(p.name for p in directory.iterdir() if not p.is_symlink() and p.is_file()
+                          and p.suffix.lower() in {".asc", ".key", ".pub"} and p.stat().st_size <= KEY_LIMIT)[:100]
+        except OSError:
+            return []
+        except ValueError:
+            return []
+
+    def trusted_keys(self, rid):
+        path = safe_path(self.root / "trusted-keys", rid + ".json")
+        return repository_keys(read_json(path)) if path.exists() else []
+
+    def review_signing_key(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Signing key approval requires the disconnected role")
+        if (not isinstance(data, dict) or set(data) not in ({"repository_id", "public_key"}, {"repository_id", "key_file"})
+                or not isinstance(data.get("repository_id"), str) or not REPO_ID.fullmatch(data["repository_id"])):
+            raise ValueError("Specify a repository ID and one public key")
+        if "key_file" in data:
+            if data["key_file"] not in self.key_files():
+                raise ValueError("Select an available public-key file in the saved transfer folder")
+            path = safe_path(self.incoming_directory(), data["key_file"])
+            with path.open("rb") as stream:
+                armor = stream.read(KEY_LIMIT + 1).decode("utf-8")
+            source = data["key_file"]
+        else:
+            armor, source = data["public_key"], "Browser public-key selection"
+        key = inspect_public_key(armor)
+        review = {**key, "review_id": uuid.uuid4().hex, "repository_id": data["repository_id"],
+                  "reviewed_at": now(), "source": source}
+        write_json(self.root / "key-reviews" / (review["review_id"] + ".json"), review)
+        return review
+
+    def trust_signing_key(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Signing key approval requires the disconnected role")
+        if (not isinstance(data, dict) or set(data) != {"review_id", "fingerprint", "confirmed"}
+                or not isinstance(data["review_id"], str) or not ID.fullmatch(data["review_id"])
+                or data["confirmed"] is not True):
+            raise ValueError("Review the public key and explicitly confirm its full fingerprint")
+        with self.lock():
+            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+                raise ValueError("Wait for the active job before approving signing keys")
+            path = safe_path(self.root / "key-reviews", data["review_id"] + ".json")
+            review = read_json(path)
+            if review.get("approved_at") or (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(review["reviewed_at"])).total_seconds() > 900:
+                raise ValueError("Key review was already approved or expired; review the key again")
+            key = inspect_public_key(review["public_key"])
+            if key["fingerprint"] != data["fingerprint"] or key["sha256"] != review["sha256"]:
+                raise ValueError("Confirmed fingerprint does not match the reviewed public key")
+            # Check RPM compatibility without enrolling the key in the host-wide keyring.
+            with rpm_key_database([key]):
+                pass
+            approved = {**key, "approved_at": now(), "source": review["source"], "review_id": review["review_id"]}
+            rid = review["repository_id"]
+            keys = self.trusted_keys(rid)
+            if any(k["fingerprint"] == key["fingerprint"] and k["sha256"] != key["sha256"] for k in keys):
+                raise ValueError("This fingerprint already has different approved key material; administrator review is required")
+            keys = [k for k in keys if k["fingerprint"] != key["fingerprint"]] + [approved]
+            if len(keys) > 8:
+                raise ValueError("A repository may have at most eight approved signing keys")
+            write_json(self.root / "trusted-keys" / (rid + ".json"), {"repository_id": rid, "signing_keys": keys})
+            write_json(path, {**review, "approved_at": approved["approved_at"]})
+        return {"repository_id": rid, "key": approved}
+
+    def validate_content(self, path, rid, keys=None, **kwargs):
+        try:
+            return validate_repository(path, require_updateinfo=("baseos" in rid or "appstream" in rid),
+                                       signing_keys=self.trusted_keys(rid) if keys is None else keys, **kwargs)
+        except SignatureError as error:
+            error.details["repository_id"] = rid
+            raise
 
     @contextlib.contextmanager
     def lock(self):
@@ -519,6 +761,10 @@ class Engine:
                 index = safe_path(public, f"snapshots/{sid}/repositories/{rid}/repodata/repomd.xml")
                 if not index.is_file():
                     raise ValueError("A public repository index is missing")
+            for key in publication_keys(current["repositories"]):
+                path = safe_path(public, f"snapshots/{sid}/keys/{key['fingerprint']}.asc")
+                if not path.is_file() or path.stat().st_size > KEY_LIMIT or digest(path) != key["sha256"]:
+                    raise ValueError("A published signing key is missing or changed")
             return {"state": "available", "reason": "Public repository indexes and client configuration are present"}
         except (OSError, ValueError, KeyError, UnicodeError) as error:
             return {"state": "unavailable", "reason": str(error)}
@@ -579,8 +825,8 @@ class Engine:
             inventory = {}
             for rid in snapshot["repositories"]:
                 repository = safe_path(source, f"repositories/{rid}")
-                checked = validate_repository(repository, require_updateinfo=("baseos" in rid or "appstream" in rid),
-                                              include_files=True)
+                checked = self.validate_content(repository, rid, keys=repository_keys(snapshot["repositories"][rid]),
+                                                include_files=True)
                 inventory[rid] = checked["files"]
             total = sum(safe_path(source, f"repositories/{rid}/{name}").stat().st_size
                         for rid, names in inventory.items() for name in names)
@@ -599,15 +845,24 @@ class Engine:
             self.update(job, stage="Verifying the public copy before exposing repository URLs")
             checked = {}
             for rid in inventory:
-                checked[rid] = validate_repository(staging / "repositories" / rid,
-                                                  require_updateinfo=("baseos" in rid or "appstream" in rid))
+                checked[rid] = self.validate_content(staging / "repositories" / rid, rid,
+                                                    keys=repository_keys(snapshot["repositories"][rid]))
+            for key in publication_keys(checked):
+                path = safe_path(staging, f"keys/{key['fingerprint']}.asc")
+                path.parent.mkdir(exist_ok=True, mode=0o700)
+                path.write_text(key["public_key"])
+                os.chmod(path, 0o644)
             if destination.exists():
                 for rid in inventory:
-                    validate_repository(destination / "repositories" / rid,
-                                        require_updateinfo=("baseos" in rid or "appstream" in rid))
+                    self.validate_content(destination / "repositories" / rid, rid,
+                                          keys=repository_keys(snapshot["repositories"][rid]))
                     if digest(destination / "repositories" / rid / "repodata/repomd.xml") != digest(
                             staging / "repositories" / rid / "repodata/repomd.xml"):
                         raise ValueError("Different public content already uses this snapshot identifier")
+                for key in publication_keys(checked):
+                    path = safe_path(destination, f"keys/{key['fingerprint']}.asc")
+                    if not path.is_file() or path.stat().st_size > KEY_LIMIT or digest(path) != key["sha256"]:
+                        raise ValueError("Different or missing public signing key for this snapshot identifier")
             verified_at = now()
             for directory, _, _ in os.walk(staging):
                 os.chmod(directory, 0o755)
@@ -970,6 +1225,8 @@ class Engine:
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
                 "incoming": incoming, "import_source": source,
+                "signing_key_files": self.key_files() if self.config.get("role") == "disconnected" else [],
+                "trusted_signing_keys": [read_json(p) for p in sorted((self.root / "trusted-keys").glob("*.json"))],
                 "publication": publication, "disconnected": disconnected,
                 "connected": connected,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
@@ -1120,8 +1377,7 @@ class Engine:
             self.update(job, stage="Revalidating repository metadata and trusted RPM signatures")
             checked = {}
             for rid in manifest["repositories"]:
-                checked[rid] = validate_repository(staging / "repositories" / rid,
-                                                  require_updateinfo=("baseos" in rid or "appstream" in rid))
+                checked[rid] = self.validate_content(staging / "repositories" / rid, rid)
             verified["verified_at"] = now()
             snapshot = {"id": sid, "created": now(), "verified_at": verified["verified_at"],
                         "source_created": manifest.get("created"), "status": "validated", "os": manifest["os"],
@@ -1327,6 +1583,10 @@ class Engine:
                 state = "cancelled"
             else:
                 state = "failed"
+            if isinstance(error, SignatureError):
+                job["signature_failure"] = error.details
+                with (self.root / "jobs" / (jid + ".log")).open("a") as stream:
+                    stream.write(json.dumps(error.details, indent=2) + "\n")
             self.update(job, status=state, stage=str(error)[:500], finished=now())
             raise
 
@@ -1342,13 +1602,13 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "client-automation", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "client-automation", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ValueError("Administrative access is required")
-    # The browser can update only the source directory; all other policy remains administrator-owned.
+    # Browser commands expose narrow administrative operations; installation policy remains root-owned.
     if CONFIG.is_symlink() or CONFIG.stat().st_uid != 0 or CONFIG.stat().st_mode & 0o022:
         raise ValueError("Configuration must be root-owned and not writable by group or others")
     engine = Engine()
@@ -1356,12 +1616,17 @@ def main():
         result = engine.status()
     elif args.command == "client-automation":
         result = engine.client_automation(args.argument)
-    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories"}:
-        raw = sys.stdin.read(16385)
-        if len(raw) > 16384:
+    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "review-signing-key", "trust-signing-key"}:
+        limit = 128 * 1024 if args.command == "review-signing-key" else 16384
+        raw = sys.stdin.read(limit + 1)
+        if len(raw) > limit:
             raise ValueError("Request is too large")
         data = json.loads(raw)
-        if args.command == "save-profile":
+        if args.command == "review-signing-key":
+            result = engine.review_signing_key(data)
+        elif args.command == "trust-signing-key":
+            result = engine.trust_signing_key(data)
+        elif args.command == "save-profile":
             result = engine.save_profile(data)
         elif args.command == "save-import-settings":
             result = engine.save_import_settings(data)

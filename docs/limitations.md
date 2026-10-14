@@ -27,17 +27,22 @@
   space but are not quota-enforced. Other workloads can consume disk concurrently.
 - Querying sizes can refresh DNF caches. It uses the host's DNF cache location.
 - Empty advisory results do not prove missing metadata or complete CVE coverage.
-- RPM signing keys must already be trusted in the host's RPM database. No automatic
-  key enrollment is added by this application.
-- Bundle checksums establish integrity, not provenance. Signed manifests, trust
-  provisioning, and FIPS-mode validation remain future release requirements.
+- Repository public keys can be explicitly reviewed and approved in the GUI.
+  Otherwise validation uses existing host RPM trust. Keys are never automatically
+  trusted from bundles. Client enrollment through the downloaded configuration
+  playbook changes the client-wide RPM keyring. Rotation/removal UI and automated
+  revocation feeds are not implemented; approval is not a freshness or revocation
+  service. Pinned keys are rechecked for expiration and revocation at publication.
+- Bundle checksums establish integrity, not provenance. Signed manifests, production trust
+  lifecycle management, and FIPS-mode validation remain future release requirements.
 - Imports are disabled by default because bundles are unsigned. An explicit
   administrator opt-in is required for this prototype. Archive bounds and safe
   extraction reduce input risk; they do not authenticate metadata or prevent a
   trusted RPM's old version from being replayed. Signing and release policy remain
   necessary before a production release.
 - The importer requires matching RHEL major version/architecture and an existing
-  trusted RPM keyring. It never downloads missing keys or dependencies.
+  trusted RPM keyring or explicitly approved repository keys. It never downloads
+  missing keys or dependencies.
 - The GUI selects an existing directory on the server. It does not mount USB
   media, browse a workstation's files, or upload bundles. Scans are shallow and
   imports are explicit. A mounted path is not bound to a particular device UUID;

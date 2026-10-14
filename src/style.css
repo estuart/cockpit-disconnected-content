@@ -97,3 +97,9 @@ body { margin: 0; background: var(--pf-t--global--background--color--secondary--
 .dc-transfer-files details { margin-top: 8px; }
 @media(max-width: 850px) { .dc-workflow { grid-template-columns: 1fr 1fr; } .dc-status-table { min-width: 540px; } }
 @media(max-width: 600px) { .dc-freshness { grid-template-columns: 1fr; } .dc-recent-activity li { grid-template-columns: 1fr; } .dc-recent-activity li > span:last-child { grid-column: auto; } .dc-repo { flex-wrap: wrap; } .dc-repo-labels { flex-direction: row; flex-wrap: wrap; } }
+
+.dc-key-form { display: grid; gap: 0.65rem; margin-block: 1rem; max-width: 60rem; }
+.dc-key-form textarea { width: 100%; font-family: var(--pf-t--global--font--family--mono); }
+.dc-key-form select, .dc-key-form textarea { padding: 0.5rem; border: 1px solid var(--pf-t--global--border--color--default); border-radius: 4px; background: var(--pf-t--global--background--color--primary--default); color: inherit; }
+.dc-key-review { margin-block: 1rem; padding: 1rem; border: 1px solid var(--pf-t--global--border--color--default); border-radius: 6px; overflow-wrap: anywhere; }
+.dc-key-review .pf-v6-c-check { margin-block: 1rem; }

@@ -116,8 +116,51 @@ subscription certificates, repository configuration, or local job logs.
 
 Bundles are **unsigned** in this version. Their hashes detect content corruption;
 they do not establish who produced the bundle. RPM signatures remain independently
-verified against the host's trusted RPM keyring. Do not treat a transferred key
+verified against approved repository keys, or the host's existing RPM keyring
+when no repository-specific keys are configured. Do not treat a transferred key
 and an accompanying bundle as an independent trust anchor.
+
+## Repository signing keys
+
+For third-party or internal content, use **Signing keys** on the disconnected host:
+
+1. Place one ASCII-armored public key (`.asc`, `.key`, or `.pub`, at most 64 KiB)
+   in the saved transfer folder and scan again, or select a file on your computer
+   or paste its contents. Keys are never fetched from the internet by the importer.
+2. Specify the exact repository ID from the incoming bundle or failed import.
+   Choose **Review public key** to see its identity, full fingerprint, expiration,
+   and key-file SHA-256. Review does not grant trust.
+3. Verify the full fingerprint against an approved vendor source or trusted record.
+   Confirm the checkbox and choose **Approve signing key** within 15 minutes.
+   Changing the repository or supplied key invalidates the displayed review.
+4. Return to **Incoming bundles** and retry the import. A missing key is reported
+   separately from unsigned RPMs, invalid signatures, and other verification errors.
+   RPM diagnostics are retained in **Activity & evidence**.
+
+Approval is an administrative action scoped to the repository inside the extension.
+Validation uses an isolated RPM database containing only that repository's approved
+keys; it does not enroll them in this host's system-wide RPM keyring. Without an
+approved key set, existing RPM trust is used. Private, expired, revoked, malformed,
+and multiple-primary-key uploads are rejected. No signature bypass is provided.
+
+Successful imports pin the approved public key bytes, full fingerprints, SHA-256,
+and approval timestamps in snapshot evidence. Publication rechecks RPM signatures
+with the pinned keys and serves the exact public key files under
+`/disconnected-content/snapshots/<snapshot-id>/keys/<fingerprint>.asc`.
+The generated `.repo` references dedicated local files in `/etc/pki/rpm-gpg/`.
+**Client setup** provides public-key downloads, published URLs, fingerprints,
+checksums, and manual setup commands. Review the fingerprints and checksum results
+before enrolling keys; do not treat the download server as an independent trust anchor.
+
+The paired `configure-repos.yml` embeds those exact public keys and enrolls them
+after explicit full fingerprint checks before refreshing DNF.
+This changes the client's system-wide RPM trust and must be reviewed with the playbook.
+Clients need `gnupg2` for full fingerprint verification; provision it from approved
+installation media before running the playbook.
+Check mode previews files and skips enrollment and metadata refresh. The security
+playbook checks the pinned public-key files and repository configuration before
+updating. `gpgcheck=1` and `disable_gpg_check=false` remain enabled. Repositories
+without reviewed keys retain the independently provisioned Red Hat key file.
 
 ## Disconnected import
 
@@ -153,7 +196,7 @@ Configure the root-owned `/etc/disconnected-content/config.json` for this role:
 This version produces unsigned bundles. Import is rejected by default. For an
 explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
 administrator. This does not authenticate the manifest; RPM signatures are still
-required and validated against the host's independently provisioned RPM keyring.
+required and validated against approved repository keys or the existing host keyring.
 
 1. Open **Incoming bundles**, choose **Browse folders**, and navigate to the
    transfer folder on the disconnected host. Mounted drives appear under
@@ -217,7 +260,8 @@ bootstrap repository. Connected sync hosts do not need this subpackage.
 
 The GUI shows the current publication and timestamp, complete configuration, and
 client commands. Package GPG checks stay enabled, with keys provisioned and
-trusted independently on clients. Original repository metadata is not signed by
+reviewed before enrollment on clients. The configuration playbook enrolls approved
+repository keys with full fingerprint checks. Original repository metadata is not signed by
 this prototype (`repo_gpgcheck=0`). The default Apache setup provides HTTP; HTTPS
 and certificate trust require separately configured TLS. Entering an HTTPS URL
 does not configure the server's TLS listener.

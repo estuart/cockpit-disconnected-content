@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0",
+  "version": "0.9.0",
   "requires": { "cockpit": "300" },
   "menu": { "index": { "label": "Disconnected Content", "order": 65 } }
 }
