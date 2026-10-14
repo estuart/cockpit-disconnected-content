@@ -257,6 +257,68 @@ class ImportSourceSettings(unittest.TestCase):
         os.mkfifo(self.media / "bundle.tar.sha256")
         self.assertFalse(self.app.incoming()[0]["has_checksum"])
 
+    def test_directory_browser_lists_only_real_folders_without_changing_settings(self):
+        self.save()
+        for name in ["zeta", "Transfer bundles", ".hidden", "alpha"]:
+            (self.media / name).mkdir()
+        (self.media / "alpha" / "nested").mkdir()
+        (self.media / "archive.tar").touch()
+        (self.media / "alias").symlink_to(self.media / "alpha", target_is_directory=True)
+        os.mkfifo(self.media / "pipe")
+        before = self.config_path.read_bytes()
+        result = self.app.browse_directories({"path": str(self.media)})
+        self.assertEqual([directory["name"] for directory in result["directories"]],
+                         [".hidden", "alpha", "Transfer bundles", "zeta"])
+        self.assertEqual(result["parent"], str(self.root))
+        self.assertFalse(result["truncated"])
+        self.assertEqual(self.config_path.read_bytes(), before)
+        self.assertEqual(self.app.browse_directories({"path": "/"})["parent"], None)
+
+    def test_directory_browser_rejects_invalid_paths_and_connected_role(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.media, target_is_directory=True)
+        for path in [None, "", "relative", str(alias), str(self.root / ".."), str(self.root / "missing")]:
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.app.browse_directories({"path": path})
+        with self.assertRaises(ValueError):
+            self.app.browse_directories({"path": str(self.media), "command": "ignored"})
+        self.app.config["role"] = "connected"
+        with self.assertRaisesRegex(ValueError, "disconnected installation"):
+            self.app.browse_directories({"path": str(self.media)})
+
+    def test_mounted_locations_decode_spaces_refresh_and_omit_missing_targets(self):
+        mounts = self.root / "mounts"
+        escaped = str(self.media).replace(" ", r"\040")
+        mounts.write_text(f"/dev/test {escaped} ext4 ro 0 0\n"
+                          f"/dev/root / xfs rw 0 0\n/dev/missing {self.root}/absent vfat rw 0 0\n")
+        with patch.object(engine, "MOUNTS", mounts):
+            result = self.app.browse_directories({"path": str(self.media)})
+            mounted = [location for location in result["locations"] if location["kind"] == "mount"]
+            self.assertEqual([location["path"] for location in mounted], [str(self.media)])
+            mounts.write_text("")
+            self.assertFalse(any(location["kind"] == "mount" for location in self.app.directory_locations()))
+
+    def test_mounted_saved_source_is_still_listed_as_a_mount(self):
+        self.save()
+        mounts = self.root / "mounts"
+        escaped = str(self.media).replace(" ", r"\040")
+        mounts.write_text(f"/dev/test {escaped} ext4 ro 0 0\n")
+        with patch.object(engine, "MOUNTS", mounts):
+            locations = self.app.directory_locations()
+        self.assertEqual(next(location for location in locations if location["path"] == str(self.media))["kind"], "mount")
+
+    def test_directory_browser_bounds_response_size(self):
+        for index in range(501):
+            (self.media / f"folder-{index:04d}").mkdir()
+        result = self.app.browse_directories({"path": str(self.media)})
+        self.assertEqual(len(result["directories"]), 500)
+        self.assertTrue(result["truncated"])
+
+    def test_directory_browser_works_without_mount_metadata(self):
+        with patch.object(engine, "MOUNTS", self.root / "missing-mount-metadata"):
+            result = self.app.browse_directories({"path": str(self.media)})
+        self.assertIn("/", [location["path"] for location in result["locations"]])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,8 @@ RHEL sync host and the disconnected role on a separate RHEL system.
   checks, independent RPM signature checks, and atomic snapshot visibility.
 - A GUI-configured bundle source directory with newest-first file timestamps,
   job lifecycle times, elapsed duration, and timestamped verification evidence.
+- A host directory picker with folder navigation, breadcrumbs, filtering, and
+  shortcuts to mounted filesystems and common transfer locations.
 
 HTTP publication, incremental transfers, signed bundle manifests, and fleet
 patching are not implemented. This is an independently maintained prototype;
@@ -115,14 +117,19 @@ explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
 administrator. This does not authenticate the manifest; RPM signatures are still
 required and validated against the host's independently provisioned RPM keyring.
 
-1. Open **Incoming bundles** and enter an existing **Bundle source directory** on
-   the disconnected host. The default is the state directory's `incoming/` folder.
-   A mounted transfer-media directory such as `/mnt/transfer` is also supported.
+1. Open **Incoming bundles**, choose **Browse folders**, and navigate to the
+   transfer folder on the disconnected host. Mounted drives appear under
+   **Mounted filesystems**; **Quick locations** includes the saved source,
+   filesystem root, and existing common mount directories. Use breadcrumbs,
+   **Up one folder**, and the folder filter to navigate, then choose
+   **Use this folder**. You can also enter an absolute path directly.
 2. Choose **Save & scan** to persist the source. Stage the `.tar` and matching
    `.tar.sha256` there using the approved transfer process, then **Scan now**.
    The source must be a real directory without symlink components. Only that
-   directory is scanned; subdirectories are not searched. Mounting media and
-   transferring files are currently administrator tasks outside the application.
+   directory is scanned; subdirectories are not searched. Browsing and choosing
+   a folder do not change the saved source until **Save & scan** is selected.
+   Mounting media and transferring files are currently administrator tasks
+   outside the application.
 3. Choose **Import bundle**. The application never imports automatically.
 4. Follow the job under **Jobs & evidence**. A failed import leaves no usable
    snapshot and removes its private extraction staging directory.

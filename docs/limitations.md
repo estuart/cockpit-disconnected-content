@@ -31,6 +31,10 @@
   media, browse a workstation's files, or upload bundles. Scans are shallow and
   imports are explicit. A mounted path is not bound to a particular device UUID;
   operators must ensure the expected media is mounted there.
+- The directory picker shows real subdirectories only, omitting symlinks. It
+  lists at most 500 child folders at a time. Mount shortcuts are drawn from
+  mounted device filesystems; generic folder navigation remains available for
+  other mount types and unusual locations. Refresh updates mounted locations.
 - File modification times may be preserved during transfer and do not establish
   arrival time or content freshness. Source creation times are unsigned manifest
   data. Historical jobs may lack timestamps introduced by later engine versions.

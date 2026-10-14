@@ -27,8 +27,9 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
+MOUNTS = Path("/proc/self/mounts")
 HELPER = "/usr/libexec/disconnected-content"
 GIB = 1024 ** 3
 ID = re.compile(r"^[a-f0-9]{32}$")
@@ -347,6 +348,60 @@ class Engine:
             write_json(CONFIG, config)
             self.config = config
         return {"path": str(path), "updated_at": config["incoming_updated_at"]}
+
+    def directory_locations(self):
+        locations = {}
+
+        def add(value, label, kind="folder"):
+            try:
+                path = self.incoming_directory(value)
+                location = {"path": str(path), "label": label, "kind": kind}
+                if kind == "mount":
+                    locations[str(path)] = location
+                else:
+                    locations.setdefault(str(path), location)
+            except (OSError, ValueError):
+                pass  # Unmounted media and absent optional shortcut directories are omitted.
+
+        add(self.config.get("incoming_dir", str(self.root / "incoming")), "Saved bundle source")
+        add("/", "Filesystem root")
+        for path in ["/mnt", "/media", "/run/media"]:
+            add(path, path)
+        try:
+            for line in MOUNTS.read_text().splitlines():
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                source, target = [re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+                                  for value in fields[:2]]
+                if source.startswith("/dev/") and target not in {"/", "/boot", "/boot/efi"}:
+                    add(target, target, "mount")
+        except OSError:
+            pass  # Filesystem browsing still works without mount metadata.
+        return list(locations.values())
+
+    def browse_directories(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Directory browsing requires the disconnected installation role")
+        if not isinstance(data, dict) or set(data) != {"path"} or not isinstance(data["path"], str):
+            raise ValueError("Specify only an absolute directory path to browse")
+        path = self.incoming_directory(data["path"])
+        directories = []
+        truncated = False
+        with os.scandir(path) as entries:
+            for entry in entries:
+                try:
+                    if any(ord(c) < 32 for c in entry.name) or not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if len(directories) == 500:
+                    truncated = True
+                    break
+                directories.append({"name": entry.name, "path": str(path / entry.name)})
+        return {"path": str(path), "parent": str(path.parent) if path != path.parent else None,
+                "directories": sorted(directories, key=lambda item: (item["name"].casefold(), item["name"])),
+                "locations": self.directory_locations(), "truncated": truncated}
 
     def save_profile(self, data):
         if self.config.get("role") != "connected":
@@ -708,7 +763,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -720,12 +775,17 @@ def main():
     engine = Engine()
     if args.command == "status":
         result = engine.status()
-    elif args.command in {"save-profile", "save-import-settings"}:
+    elif args.command in {"save-profile", "save-import-settings", "browse-directories"}:
         raw = sys.stdin.read(16385)
         if len(raw) > 16384:
-            raise ValueError("Profile is too large")
+            raise ValueError("Request is too large")
         data = json.loads(raw)
-        result = engine.save_profile(data) if args.command == "save-profile" else engine.save_import_settings(data)
+        if args.command == "save-profile":
+            result = engine.save_profile(data)
+        elif args.command == "save-import-settings":
+            result = engine.save_import_settings(data)
+        else:
+            result = engine.browse_directories(data)
     elif args.command == "start":
         engine.jobs()
         result = engine.start(args.argument, args.snapshot)

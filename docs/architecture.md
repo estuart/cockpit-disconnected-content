@@ -7,6 +7,13 @@ can save only a local import source directory through the GUI; destination
 storage and trust policy remain in administrator-managed configuration. Browser
 requests cannot choose an executable or arbitrary URL.
 
+The disconnected role also exposes an administrator-only directory browser. It
+returns at most 500 immediate real subdirectories, a parent path, and shortcuts
+from the current Linux mount table and existing common transfer directories.
+Mount-table path escapes are decoded; absent locations and symlinks are omitted.
+It returns folder names and paths, without reading file contents or modifying
+source settings. The GUI applies a chosen folder only after Save & scan.
+
 Starting a job writes a durable JSON record under an exclusive lock and starts a
 systemd template service. The service owns the process tree. State is replaced
 atomically; command output is stored locally. Jobs survive browser disconnects.

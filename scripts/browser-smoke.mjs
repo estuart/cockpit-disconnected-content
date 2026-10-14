@@ -43,6 +43,49 @@ try {
   const disconnected = initialState.role === 'disconnected';
   await app.getByRole('tab', { name: disconnected ? 'Incoming bundles' : 'Repositories', exact: true }).click();
   await expect(app.getByText(disconnected ? 'Transfer inbox' : 'Choose content to mirror', { exact: true })).toBeVisible();
+  if (process.argv.includes('--check-picker')) {
+    const mount = process.env.COCKPIT_TEST_MOUNT;
+    const source = process.env.COCKPIT_TEST_SOURCE;
+    if (!disconnected || !mount || !source) throw new Error('Picker check requires the disconnected role, COCKPIT_TEST_MOUNT and COCKPIT_TEST_SOURCE');
+    restoreSource = initialState.import_source.path;
+    const field = app.getByRole('textbox', { name: 'Bundle source directory', exact: true });
+    const picker = app.getByRole('dialog', { name: 'Choose transfer folder', exact: true });
+    const browse = app.getByRole('button', { name: 'Browse folders', exact: true });
+    const status = () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
+    await expect(field).toHaveValue(restoreSource);
+    await browse.click();
+    await expect(picker).toBeVisible();
+    await picker.getByRole('button', { name: mount, exact: true }).click();
+    await expect(picker.locator('.dc-picker-selection code')).toHaveText(mount);
+    await picker.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(picker).toBeHidden();
+    await expect(field).toHaveValue(restoreSource);
+    expect((await status()).import_source.path).toBe(restoreSource);
+    await browse.click();
+    await picker.getByRole('button', { name: mount, exact: true }).click();
+    const folderName = source.slice(source.lastIndexOf('/') + 1);
+    await picker.getByRole('textbox', { name: 'Filter folders', exact: true }).fill('no-folder-matches-this');
+    await expect(picker.getByText('No folders match this filter.', { exact: true })).toBeVisible();
+    await picker.getByRole('textbox', { name: 'Filter folders', exact: true }).fill(folderName);
+    await picker.getByRole('button', { name: `Open folder ${folderName}`, exact: true }).click();
+    await expect(picker.locator('.dc-picker-selection code')).toHaveText(source);
+    await picker.getByRole('button', { name: 'Up one folder', exact: true }).click();
+    await expect(picker.locator('.dc-picker-selection code')).toHaveText(mount);
+    await picker.getByRole('button', { name: `Open folder ${folderName}`, exact: true }).click();
+    await expect(picker.locator('.dc-picker-selection code')).toHaveText(source);
+    await expect(picker.getByRole('button', { name: 'Use this folder', exact: true })).toBeEnabled();
+    await page.screenshot({ path: '.local/cockpit-directory-picker.png', fullPage: true });
+    await picker.getByRole('button', { name: 'Use this folder', exact: true }).click();
+    await expect(field).toHaveValue(source);
+    expect((await status()).import_source.path).toBe(restoreSource);
+    await app.getByRole('button', { name: 'Save & scan', exact: true }).click();
+    await expect.poll(async () => (await status()).import_source.path).toBe(source);
+    // status() starts a fresh helper, so this checks the persisted configuration.
+    await expect(app.getByRole('textbox', { name: 'Bundle source directory', exact: true })).toHaveValue(source);
+    await expect(app.locator('.dc-repo time').first()).toBeVisible();
+    console.log('Mounted-filesystem picker navigation, filtering, cancel, parent navigation, selection without saving, and persistence after Save & scan passed');
+  }
   if (process.argv.includes('--check-source')) {
     const source = process.env.COCKPIT_TEST_SOURCE;
     if (!disconnected || !source) throw new Error('Source workflow requires the disconnected role and COCKPIT_TEST_SOURCE');

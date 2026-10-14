@@ -115,3 +115,30 @@ Version 0.3.0 adds source-directory configuration and timestamped evidence.
 
 This GUI check used a local staging directory, not physical removable media.
 Mounting media and moving bundle files remain administrator tasks.
+
+## Host directory picker
+
+Version 0.4.0 adds a directory picker to the disconnected transfer inbox.
+
+- All 46 backend tests pass, along with TypeScript checking and the production
+  frontend build. New cases cover real-directory-only listings, sorting, parent
+  navigation, invalid paths, role restrictions, mount-table escape decoding,
+  mount refresh, saved sources on mounted filesystems, bounded listings, and
+  operation without mount metadata.
+- Built and installed the updated RPM on the disconnected RHEL VM with all
+  package repositories disabled.
+- Created a temporary loopback filesystem, copied a valid transfer bundle and
+  checksum into a folder whose name contained spaces, and remounted it read-only.
+- Through Cockpit, discovered the mount shortcut and navigated to its transfer
+  folder without typing the source path. Verified filtering, parent navigation,
+  cancellation, and folder selection without changing the saved source.
+- Save & scan persisted the chosen path, confirmed by a fresh backend process.
+  An import started through the GUI successfully read that source and matched
+  the already validated snapshot; it did not duplicate the snapshot.
+- Restored the default inbox, removed the temporary test mount and image, and
+  removed the loopback test session. Normal web-console authentication was
+  preserved throughout.
+
+This validates browsing a mounted read-only filesystem, not physical USB device
+detection, mounting, or hot-unplug behavior. Mounting transfer media remains an
+administrator task. Browser artifacts and host-specific details are local-only.

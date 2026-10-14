@@ -24,6 +24,27 @@ body { margin: 0; background: var(--pf-t--global--background--color--secondary--
 .dc-selection { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
 .dc-source-controls { display: grid; gap: 10px; margin: 20px 0; }
 .dc-source-controls .dc-actions { margin-top: 4px; }
+.dc-source-input { display: flex; gap: 12px; align-items: center; }
+.dc-source-input .pf-v6-c-form-control { flex: 1; min-width: 0; }
+.dc-source-input > button { flex-shrink: 0; }
+.dc-picker-body { display: grid; gap: 20px; }
+.dc-picker-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; }
+.dc-picker-locations { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.dc-picker-locations strong:not(:first-child) { margin-top: 16px; }
+.dc-picker-locations button { justify-content: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.dc-picker-folders { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.dc-picker-breadcrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; overflow-wrap: anywhere; }
+.dc-picker-breadcrumbs button { padding: 0 4px; white-space: normal; }
+.dc-picker-toolbar { display: flex; flex-wrap: wrap; gap: 10px; }
+.dc-picker-directory-list { min-height: 180px; max-height: 320px; overflow: auto; }
+.dc-picker-directory-list ul { padding: 0; list-style: none; }
+.dc-picker-directory-list li { border-bottom: 1px solid var(--pf-t--global--border--color--default); }
+.dc-picker-directory-list button { display: flex; gap: 10px; padding: 12px 8px; width: 100%; text-align: left; }
+.dc-picker-directory-list button svg { flex-shrink: 0; }
+.dc-picker-directory-list button span:nth-child(2) { flex: 1; overflow-wrap: anywhere; }
+.dc-picker-selection { display: grid; gap: 6px; padding-top: 16px; border-top: 1px solid var(--pf-t--global--border--color--default); }
+.dc-picker-selection code { overflow-wrap: anywhere; }
+@media(max-width: 600px) { .dc-source-input { flex-direction: column; align-items: stretch; } .dc-picker-layout { grid-template-columns: 1fr; } }
 .dc-source-status { display: grid; gap: 8px; margin-bottom: 24px; }
 .dc-source-status code, .dc-content p code { overflow-wrap: anywhere; }
 .dc-timeline { display: flex; flex-wrap: wrap; gap: 12px 28px; margin: 16px 0; font-size: 13px; }
