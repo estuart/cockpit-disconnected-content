@@ -28,7 +28,7 @@ import uuid
 from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -469,7 +469,7 @@ class Engine:
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports", "incoming", ".imports"):
+        for sub in ("jobs", "snapshots", "exports", "export-records", "incoming", ".imports"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
 
     @contextlib.contextmanager
@@ -734,17 +734,134 @@ class Engine:
     def unit(jid):
         return f"disconnected-content-job@{jid}.service"
 
+    @staticmethod
+    def fingerprint(path):
+        info = path.stat()
+        return {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "ctime_ns": info.st_ctime_ns,
+                "inode": info.st_ino, "device": info.st_dev}
+
+    def export_records(self, jobs):
+        """Retain artifact evidence independently of the recent jobs returned to the UI.
+
+        Old jobs record verification at creation but cannot establish whether the
+        file has changed since then. Migration never silently certifies old files.
+        """
+        records = {path.stem: read_json(path) for path in (self.root / "export-records").glob("*.json")}
+        for job in jobs:  # jobs() is newest first
+            sid, result = job.get("snapshot_id"), job.get("result", {})
+            if (job.get("operation") != "export" or job.get("status") != "succeeded"
+                    or not isinstance(sid, str) or not ID.fullmatch(sid) or sid in records
+                    or not re.fullmatch(r"[a-f0-9]{64}", result.get("sha256", ""))
+                    or result.get("path") != str(self.root / "exports" / f"{sid}.tar")):
+                continue
+            record = {"snapshot_id": sid, "exported_at": job.get("finished", job["created"]),
+                      "verified_at": result.get("verified_at", job.get("finished")),
+                      "job_id": job["id"], "sha256": result["sha256"], "bytes": result["bytes"],
+                      "files_verified": result.get("files_verified"), "fingerprint": None}
+            path = self.root / "export-records" / f"{sid}.json"
+            with self.lock():
+                if path.exists():
+                    record = read_json(path)
+                else:
+                    write_json(path, record)
+            records[sid] = record
+        return records
+
+    def export_summary(self, record):
+        sid = record["snapshot_id"]
+        if not ID.fullmatch(sid):
+            raise ValueError("Invalid export snapshot identifier")
+        path = self.root / "exports" / f"{sid}.tar"
+        sidecar = path.with_suffix(".tar.sha256")
+        summary = {**record, "path": str(path), "checksum_path": str(sidecar),
+                   "state": "missing", "reason": "Archive or checksum file is missing"}
+        if path.is_symlink() or sidecar.is_symlink():
+            summary.update(state="changed", reason="Transfer files must be regular files, without symlinks")
+        elif path.is_file() and sidecar.is_file():
+            expected = f"{record['sha256']}  {path.name}\n"
+            try:
+                matches = sidecar.stat().st_size <= 4096 and sidecar.read_text() == expected
+            except (OSError, UnicodeError):
+                matches = False
+            if not matches or path.stat().st_size != record["bytes"]:
+                summary.update(state="changed", reason="Transfer file size or checksum sidecar differs from the export record")
+            elif record.get("fingerprint") is None:
+                summary.update(state="unverified", reason="Historical export found; re-verify the existing files before transfer")
+            elif self.fingerprint(path) != record["fingerprint"]:
+                summary.update(state="changed", reason="Archive changed since verification; verify again or rebuild it")
+            else:
+                summary.update(state="available", reason="Archive and checksum are present; verified at the recorded time")
+        return summary
+
+    def connected_status(self, snapshots, jobs):
+        profile = self.profile()
+        selection = set(profile["repositories"])
+        records = self.export_records(jobs)
+        exports = {sid: self.export_summary(record) for sid, record in records.items()}
+        snapshots = sorted((s for s in snapshots if s["status"] == "validated" and not s.get("imported")),
+                           key=lambda s: s["created"], reverse=True)
+        for snapshot in snapshots:
+            snapshot["export"] = exports.get(snapshot["id"])
+        latest = snapshots[0] if snapshots else None
+        matching = next((s for s in snapshots if set(s["repositories"]) == selection), None)
+        latest_export = max((e for e in exports.values() if e.get("exported_at")),
+                            key=lambda e: e["exported_at"], default=None)
+        active = next((j for j in jobs if j["status"] in {"queued", "running"}), None)
+        last_preflight = next((j for j in jobs if j.get("operation") == "preflight"
+                               and j.get("profile") == profile), None)
+        relevant = next((j for j in jobs if (
+            j.get("operation") == "sync" and set(j.get("profile", {}).get("repositories", [])) == selection
+            or j is last_preflight and j["status"] in {"failed", "cancelled", "interrupted"}
+            or matching and j.get("operation") in {"export", "verify-export"} and j.get("snapshot_id") == matching["id"])), None)
+        plan_job = next((j for j in jobs if j.get("plan") and j.get("profile") == profile), None)
+        phase, action, reason = "select", None, "Choose the repositories to mirror and save your selection."
+        bundle = matching.get("export") if matching else None
+        if not selection:
+            pass
+        elif relevant and relevant["status"] in {"failed", "cancelled", "interrupted"}:
+            phase, action, reason = "failed", relevant["operation"], relevant["stage"]
+            if action == "verify-export":
+                action = "export"  # A failed integrity check needs a fresh bundle, not an endless retry.
+            # A later successful export/verification record can outlive its job.
+            if bundle and bundle["state"] == "available" and bundle["verified_at"] > relevant.get("finished", relevant["created"]):
+                phase, action, reason = "ready", None, "The verified bundle is available for your approved transfer process."
+        elif not matching:
+            phase, action, reason = "sync", "sync", "No validated snapshot matches the saved repository selection."
+        elif not bundle:
+            phase, action, reason = "export", "export", "The saved selection has a validated snapshot that has not been exported."
+        elif bundle["state"] == "available":
+            phase, action, reason = "ready", None, "The verified bundle is available for your approved transfer process."
+        else:
+            action = "export" if bundle["state"] == "missing" else "verify-export"
+            phase, reason = "verify" if action == "verify-export" else "export", bundle["reason"]
+        if active:
+            phase, action, reason = "running", None, active["stage"]
+        selected = []
+        for rid in sorted(selection):
+            snapshot = next((s for s in snapshots if rid in s["repositories"]), None)
+            selected.append({"id": rid, "snapshot_id": snapshot["id"] if snapshot else None,
+                             "synced_at": snapshot["created"] if snapshot else None,
+                             "repository": snapshot["repositories"][rid] if snapshot else None,
+                             "export": snapshot.get("export") if snapshot else None})
+        return {"phase": phase, "action": action, "reason": reason, "active": active,
+                "attention_job": relevant if phase == "failed" else None,
+                "latest_sync": latest, "selection_snapshot": matching, "latest_export": latest_export,
+                "selection_changed": bool(latest and set(latest["repositories"]) != selection),
+                "selected_repositories": selected, "plan_job": plan_job}
+
     def status(self):
         jobs = self.jobs()
         snapshots = [read_json(p) for p in (self.root / "snapshots").glob("*/snapshot.json")]
         usage = shutil.disk_usage(self.root)
         source, incoming = self.scan_incoming() if self.config.get("role") == "disconnected" else (None, [])
+        connected = self.connected_status(snapshots, jobs) if self.config.get("role") == "connected" else None
         return {"version": VERSION, "role": self.config.get("role"), "os": host_os(),
                 "storage": {"path": str(self.root), "free": usage.free, "total": usage.total,
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
                 "incoming": incoming, "import_source": source,
                 "publication": self.publication_status() if self.config.get("role") == "disconnected" else None,
+                "connected": connected,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
 
@@ -1019,7 +1136,38 @@ class Engine:
         os.replace(partial, dest)
         sidecar = dest.with_suffix(".tar.sha256")
         sidecar.write_text(f"{checksum}  {dest.name}\n")
+        self.record_export(sid, job["id"], verified, checksum, exported_at=now())
         self.update(job, result={"path": str(dest), "sha256": checksum, "bytes": dest.stat().st_size, **verified})
+
+    def record_export(self, sid, job_id, verified, checksum, exported_at=None):
+        path = self.root / "exports" / f"{sid}.tar"
+        record_path = self.root / "export-records" / f"{sid}.json"
+        with self.lock():
+            previous = read_json(record_path) if record_path.exists() else {}
+            record = {"snapshot_id": sid, "exported_at": exported_at or previous.get("exported_at"),
+                      "verified_at": verified["verified_at"], "job_id": previous.get("job_id", job_id) if not exported_at else job_id,
+                      "verification_job_id": job_id, "sha256": checksum, "bytes": path.stat().st_size,
+                      "files_verified": verified["files_verified"], "fingerprint": self.fingerprint(path)}
+            write_json(record_path, record)
+
+    def verify_export(self, job):
+        sid = job["snapshot_id"]
+        path = self.root / "exports" / f"{sid}.tar"
+        sidecar = path.with_suffix(".tar.sha256")
+        if path.is_symlink() or sidecar.is_symlink() or not path.is_file() or not sidecar.is_file():
+            raise ValueError("Archive and checksum must both be present as regular files; rebuild the transfer bundle")
+        self.update(job, stage="Verifying exported archive and checksum")
+        verified = verify_archive(path)
+        if verified["snapshot_id"] != sid:
+            raise ValueError("Archive belongs to a different snapshot; rebuild the transfer bundle")
+        checksum = digest(path)
+        if sidecar.stat().st_size > 4096 or sidecar.read_text() != f"{checksum}  {path.name}\n":
+            raise ValueError("Archive checksum does not match its sidecar; rebuild the transfer bundle")
+        previous = self.export_records(self.jobs()).get(sid)
+        if previous and previous["sha256"] != checksum:
+            raise ValueError("Archive differs from the last successful export; rebuild the transfer bundle")
+        self.record_export(sid, job["id"], verified, checksum)
+        self.update(job, result={"path": str(path), "sha256": checksum, "bytes": path.stat().st_size, **verified})
 
     def run(self, jid):
         job = read_json(self.job_path(jid))
@@ -1038,8 +1186,7 @@ class Engine:
             elif job["operation"] == "export":
                 self.export(job)
             elif job["operation"] == "verify-export":
-                path = self.root / "exports" / f"{job['snapshot_id']}.tar"
-                self.update(job, stage="Verifying exported archive", result=verify_archive(path))
+                self.verify_export(job)
             elif job["operation"] == "import":
                 self.import_bundle(job)
             elif job["operation"] == "publish":

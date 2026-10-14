@@ -10,6 +10,7 @@ type Plan = { packages: number; package_bytes: number; required_free: number;
   free_bytes: number; within_budget: boolean; enough_space: boolean };
 type Job = { id: string; operation: string; status: string; stage: string; created: string;
   started?: string; finished?: string; updated?: string; bundle_name?: string; incoming_dir?: string;
+  profile?: { repositories: string[]; max_gib: number };
   snapshot_id?: string; plan?: Plan; result?: { path?: string; sha256?: string; bytes?: number;
   files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
   source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
@@ -18,13 +19,23 @@ type Publication = { snapshot_id: string; published_at: string; verified_at: str
 type Automation = { snapshot_id: string; has_updateinfo: boolean; files: Record<string, string> };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
   imported?: boolean; source_created?: string; verified_at?: string;
+  export?: ExportRecord | null;
   repositories: Record<string, { packages: number; metadata_types: string[] }> };
+type ExportRecord = { snapshot_id: string; exported_at: string | null; verified_at?: string; bytes: number;
+  path: string; checksum_path: string; sha256: string; state: 'available' | 'missing' | 'changed' | 'unverified'; reason: string };
+type Connected = { phase: 'select' | 'sync' | 'export' | 'verify' | 'ready' | 'failed' | 'running';
+  action: string | null; reason: string; active: Job | null; attention_job: Job | null;
+  latest_sync: Snapshot | null; selection_snapshot: Snapshot | null; latest_export: ExportRecord | null;
+  selection_changed: boolean; plan_job: Job | null;
+  selected_repositories: { id: string; snapshot_id: string | null; synced_at: string | null;
+    repository: { packages: number; package_bytes: number } | null; export: ExportRecord | null }[] };
 type State = { version: string; role: string; os: { name: string; major: string; arch: string };
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
   jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; modified: string; has_checksum: boolean }[];
   import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
   publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null } | null;
+  connected: Connected | null;
   capabilities: { allow_unsigned_imports: boolean } };
 type CockpitProcess = Promise<string> & { input: (data: string) => void };
 type DirectoryListing = { path: string; parent: string | null; truncated: boolean;
@@ -44,6 +55,7 @@ function bytes(value: number) {
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
 }
+function repositoryCount(count: number) { return `${count} ${count === 1 ? 'repository' : 'repositories'}`; }
 function downloadFile(content: string, filename: string) {
   const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
   const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
@@ -94,6 +106,130 @@ function Timestamp({ value }: { value: string }) {
   return <time dateTime={value} title={value}>{new Date(value).toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
   })}</time>;
+}
+function relativeTime(value: string) {
+  const seconds = (Date.parse(value) - Date.now()) / 1000;
+  if (!Number.isFinite(seconds)) return 'Not recorded';
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+  for (const [unit, divisor] of [['year', 31536000], ['month', 2592000], ['day', 86400], ['hour', 3600], ['minute', 60]] as const) {
+    if (Math.abs(seconds) >= divisor) return formatter.format(Math.trunc(seconds / divisor), unit);
+  }
+  return seconds > 5 ? formatter.format(Math.ceil(seconds), 'second') : 'Just now';
+}
+function FreshTime({ value }: { value?: string | null }) {
+  return value ? <span className="dc-fresh-time"><strong>{relativeTime(value)}</strong><span><Timestamp value={value} /></span></span> : <span>Never</span>;
+}
+function exportLabel(bundle?: ExportRecord | null) {
+  if (!bundle) return 'Not exported';
+  return { available: 'Bundle available', missing: 'Transfer files missing', changed: 'Re-verification needed', unverified: 'Historical bundle — verify before transfer' }[bundle.state];
+}
+function ExportDetails({ bundle }: { bundle: ExportRecord }) {
+  return <div className="dc-export dc-transfer-files" aria-label="Transfer bundle details">
+    <div><Label color={bundle.state === 'available' ? 'green' : 'orange'}>{exportLabel(bundle)}</Label> · {bytes(bundle.bytes)}</div>
+    <p>{bundle.reason}</p>
+    <div><strong>Last exported</strong><FreshTime value={bundle.exported_at} /></div>
+    {bundle.verified_at && <div><strong>Last verified</strong><FreshTime value={bundle.verified_at} /></div>}
+    <strong>Transfer both files</strong><code>{bundle.path}</code><code>{bundle.checksum_path}</code>
+    <details><summary>Checksum and transfer evidence</summary><p>SHA-256</p><code>{bundle.sha256}</code>
+      <p>Transfer and disconnected import are not confirmed by this host. Use your approved transfer process.</p>
+      <p>Availability checks file attributes and the checksum sidecar. Use Verify existing bundle to check archive contents again.</p></details>
+  </div>;
+}
+
+function ConnectedDashboard({ state, busy, draft, onTab, onStart, onStop }: {
+  state: State; busy: boolean; draft: boolean; onTab: (tab: string) => void;
+  onStart: (operation: string, sid?: string) => void; onStop: (id: string) => void;
+}) {
+  const connected = state.connected!;
+  const { phase, active, latest_sync: latest, selection_snapshot: snapshot, latest_export: lastExport, attention_job: attention } = connected;
+  const bundle = snapshot?.export;
+  const failureOperation = attention?.operation;
+  const budgetFailure = phase === 'failed' && failureOperation === 'sync' && attention?.plan &&
+    attention.profile?.max_gib === state.profile.max_gib &&
+    (!attention.plan.within_budget || !attention.plan.enough_space);
+  const title = { select: 'Choose content to mirror', sync: 'Saved selection needs a sync', export: 'Build a transfer bundle',
+    verify: 'Verify the existing transfer bundle', ready: 'Verified bundle ready for transfer',
+    failed: `Latest ${failureOperation === 'verify-export' ? 'bundle verification' : failureOperation ?? 'operation'} ${attention?.status ?? 'failed'}`,
+    running: 'Current operation' }[phase];
+  const retryingSync = active?.operation === 'sync' || phase === 'failed' && failureOperation === 'sync';
+  const synced = Boolean(snapshot) && !retryingSync;
+  const exported = bundle?.state === 'available' && synced && phase !== 'failed' &&
+    active?.operation !== 'export' && active?.operation !== 'verify-export';
+  const currentStep = active ? active.operation === 'sync' || active.operation === 'preflight' ? 1 : 2 :
+    phase === 'select' ? 0 : phase === 'sync' || phase === 'failed' && ['sync', 'preflight'].includes(failureOperation ?? '') ? 1 : phase === 'ready' ? 3 : 2;
+  return <>
+    {draft && <Alert variant="info" isInline title="Unsaved repository edits">
+      Dashboard actions use the saved selection. <Button variant="link" isInline onClick={() => onTab('profile')}>Review and save your changes</Button></Alert>}
+    <div className="dc-freshness">
+      <Card><CardTitle>Last successful sync</CardTitle><CardBody>
+        <div className="dc-fresh-metric"><FreshTime value={latest?.created} /></div>
+        <p>{latest ? `${repositoryCount(Object.keys(latest.repositories).length)} · ${bytes(latest.package_bytes)} of RPM content` : 'No validated snapshot has been created.'}</p>
+        {connected.selection_changed && <p className="dc-muted">The latest snapshot differs from the saved repository selection.</p>}
+      </CardBody></Card>
+      <Card><CardTitle>Last successful export</CardTitle><CardBody>
+        <div className="dc-fresh-metric"><FreshTime value={lastExport?.exported_at} /></div>
+        <p>{lastExport ? exportLabel(lastExport) : 'No completed export has been recorded.'}</p>
+        {lastExport && latest && lastExport.snapshot_id !== latest.id && <p className="dc-muted">This export contains an older or different snapshot.</p>}
+      </CardBody></Card>
+    </div>
+    <Card className={`dc-next-action ${phase === 'failed' ? 'dc-next-failed' : ''}`}><CardTitle>{title}</CardTitle><CardBody>
+      {active ? <>
+        <div className="dc-current"><Spinner size="md" /><div><strong>{active.operation}</strong><p>{active.stage}</p>
+          <p className="dc-muted">Elapsed {duration(active) ?? 'Waiting'} · Started {active.started ? <Timestamp value={active.started} /> : 'Waiting for worker'}</p>
+          {active.updated && <p className="dc-muted">Last stage update <FreshTime value={active.updated} /></p>}
+          <small>Runs in a system service. You can close this page and return later.</small></div>
+          <Button variant="danger" isDisabled={busy} onClick={() => onStop(active.id)}>Stop job</Button></div>
+      </> : <>
+        <p>{connected.reason}</p>
+        {snapshot && <p className="dc-muted">Saved selection: {repositoryCount(Object.keys(snapshot.repositories).length)} · Content captured <Timestamp value={snapshot.created} /></p>}
+        <div className="dc-actions">
+          {phase === 'select' || budgetFailure ? <Button onClick={() => onTab('profile')}>{budgetFailure ? 'Review sync settings' : 'Configure repositories'}</Button> :
+            phase === 'ready' ? <Button onClick={() => onTab('snapshots')}>Show transfer files</Button> :
+              <Button isDisabled={busy} onClick={() => onStart(connected.action!, snapshot?.id)}>
+                {phase === 'failed' ? failureOperation === 'verify-export' ? 'Rebuild transfer bundle' : `Retry ${failureOperation}` :
+                  connected.action === 'sync' ? 'Sync saved selection' : connected.action === 'export' ? 'Build & verify transfer bundle' : 'Verify existing bundle'}</Button>}
+          {phase === 'failed' && <Button variant="secondary" onClick={() => onTab('jobs')}>View failed attempt</Button>}
+          {snapshot && phase !== 'ready' && <Button variant="secondary" onClick={() => onTab('snapshots')}>View snapshots &amp; exports</Button>}
+          {phase === 'ready' && <Button variant="secondary" isDisabled={busy} onClick={() => onStart('sync')}>Sync saved selection</Button>}
+          {state.profile.repositories.length > 0 && <Button variant="link" isDisabled={busy} onClick={() => onStart('preflight')}>Check saved selection size</Button>}
+        </div>
+      </>}
+    </CardBody></Card>
+    <ol className="dc-workflow" aria-label="Saved selection workflow">{[
+      ['Select repositories', state.profile.repositories.length ? 'Saved selection' : 'Needed', Boolean(state.profile.repositories.length)],
+      ['Sync & validate', synced ? 'Validated snapshot available' : snapshot ? 'Previous snapshot retained' : 'Needed', synced],
+      ['Build & verify bundle', exported ? 'Verified bundle available' : retryingSync && bundle ? 'Previous bundle retained' : bundle ? exportLabel(bundle) : 'Needed', exported],
+      ['Transfer content', 'Manual handoff · import not confirmed', false],
+    ].map(([name, detail, complete], index) => <li key={String(name)} className={`${complete ? 'dc-step-complete' : ''} ${currentStep === index ? 'dc-step-current' : ''}`}
+      aria-current={currentStep === index ? 'step' : undefined}><span className="dc-step-number">{index + 1} · {currentStep === index && active ? 'In progress' : currentStep === index && phase === 'failed' ? 'Needs attention' : complete ? 'Complete' : currentStep === index ? 'Next step' : 'Remaining'}</span>
+      <strong>{name}</strong><span>{detail}</span></li>)}</ol>
+    <Card><CardTitle>Selected repositories</CardTitle><CardBody>
+      {!connected.selected_repositories.length ? <p>Save a repository selection to begin.</p> : <div className="dc-table-scroll"><table className="dc-status-table" aria-label="Selected repository status">
+        <thead><tr><th>Repository</th><th>Last successful sync</th><th>Export status</th></tr></thead><tbody>{connected.selected_repositories.map(repo => <tr key={repo.id}>
+          <td><strong>{state.repositories.find(known => known.id === repo.id)?.name ?? repo.id}</strong><code>{repo.id}</code>
+            {repo.repository && <span className="dc-muted">{repo.repository.packages.toLocaleString()} {repo.repository.packages === 1 ? 'package' : 'packages'} · {bytes(repo.repository.package_bytes)}</span>}</td>
+          <td><FreshTime value={repo.synced_at} /></td><td>{exportLabel(repo.export)}
+            {repo.export?.exported_at && <span className="dc-muted">Exported {relativeTime(repo.export.exported_at)}</span>}</td>
+        </tr>)}</tbody></table></div>}
+      <div className="dc-actions"><Button variant="link" isInline onClick={() => onTab('profile')}>Edit repository selection</Button></div>
+    </CardBody></Card>
+    {connected.plan_job?.plan && <Card><CardTitle>Size check for the saved selection</CardTitle><CardBody>
+      <p><FreshTime value={connected.plan_job.finished ?? connected.plan_job.created} /></p>
+      <p>{connected.plan_job.plan.packages.toLocaleString()} packages · {bytes(connected.plan_job.plan.package_bytes)} declared RPM content · {bytes(connected.plan_job.plan.required_free)} free space required</p>
+      <Label color={connected.plan_job.plan.within_budget && connected.plan_job.plan.enough_space ? 'green' : 'red'}>
+        {connected.plan_job.plan.within_budget && connected.plan_job.plan.enough_space ? 'Fit the budget and storage when checked' : 'Exceeded the budget or available storage when checked'}</Label>
+      <p className="dc-muted">Every sync checks sizes and free space again. This result applies to the saved repository selection and budget.</p>
+    </CardBody></Card>}
+    <Card><CardTitle>Recent activity</CardTitle><CardBody>
+      {!state.jobs.length ? <p>No operations have run yet.</p> : <ol className="dc-recent-activity">{state.jobs.slice(0, 5).map(job => <li key={job.id}>
+        <span><strong>{job.operation}</strong> <Label color={color(job.status)}>{job.status}</Label></span>
+        <span><FreshTime value={job.finished ?? job.created} /></span><span className="dc-muted">{job.stage}</span></li>)}</ol>}
+      <Button variant="link" isInline onClick={() => onTab('jobs')}>View activity &amp; evidence</Button>
+    </CardBody></Card>
+    <div className="dc-dashboard-footer"><span><strong>Available storage</strong> {bytes(state.storage.free)} · {bytes(state.storage.reserve)} reserved</span>
+      <span>{state.snapshots.length} validated {state.snapshots.length === 1 ? 'snapshot' : 'snapshots'}</span></div>
+    <p className="dc-muted">Sync times record when content was captured, not whether newer upstream updates exist. Transfer bundles remain unsigned prototype artifacts.</p>
+  </>;
 }
 function duration(job: Job) {
   if (!job.started) return undefined;
@@ -245,8 +381,8 @@ function App() {
     await call(['save-profile'], { repositories: selected, max_gib: Number(budget) });
     setDirty(false);
   };
-  const start = (operation: string, sid?: string) => act(async () => {
-    if (operation === 'preflight' || operation === 'sync') await save();
+  const start = (operation: string, sid?: string, saveDraft = true) => act(async () => {
+    if (saveDraft && (operation === 'preflight' || operation === 'sync')) await save();
     await call(['start', operation, ...(sid ? [sid] : [])]);
     setTab('overview');
   });
@@ -260,7 +396,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.6.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.7.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -272,11 +408,14 @@ function App() {
         {!disconnected && <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />}
         {disconnected && <Tab eventKey="incoming" title={<TabTitleText>Incoming bundles</TabTitleText>} />}
         {disconnected && <Tab eventKey="publish" title={<TabTitleText>Publish &amp; clients</TabTitleText>} />}
-        <Tab eventKey="snapshots" title={<TabTitleText>Snapshots <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
-        <Tab eventKey="jobs" title={<TabTitleText>Jobs &amp; evidence</TabTitleText>} />
+        <Tab eventKey="snapshots" title={<TabTitleText>{disconnected ? 'Snapshots' : 'Snapshots & exports'} <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
+        <Tab eventKey="jobs" title={<TabTitleText>{disconnected ? 'Jobs & evidence' : 'Activity & evidence'}</TabTitleText>} />
       </Tabs>
       <section className="dc-content">
-        {tab === 'overview' && <>
+        {tab === 'overview' && !disconnected && state.connected && <ConnectedDashboard state={state} busy={busy} draft={dirty}
+          onTab={setTab} onStart={(operation, sid) => { void start(operation, sid, false); }}
+          onStop={id => { void act(() => call(['cancel', id])); }} />}
+        {tab === 'overview' && (disconnected || !state.connected) && <>
           <div className="dc-stats">
             <Card><CardTitle>Available storage</CardTitle><CardBody><div className="dc-metric">{bytes(state.storage.free)}</div>
               <p>{bytes(state.storage.reserve)} reserved for the operating system and other workloads</p></CardBody></Card>
@@ -353,10 +492,15 @@ function App() {
             <TextInput aria-label="Filter repositories" placeholder="Filter repositories, for example supplementary" value={filter}
               onChange={(_, v) => setFilter(v)} /></div>
           <div className="dc-selection">{selected.length} selected {dirty && <Label color="orange">Unsaved changes</Label>}</div>
-          <div className="dc-repos">{filtered.map(repo => <div key={repo.id} className="dc-repo">
-            <Checkbox id={`repo-${repo.id}`} label={repo.name} description={repo.id} isChecked={selected.includes(repo.id)}
-              isDisabled={disabled} onChange={(_, checked) => { setSelected(old => checked ? [...old, repo.id] : old.filter(r => r !== repo.id)); setDirty(true); }} />
-            {repo.enabled && <Label isCompact color="blue">Enabled on host</Label>}</div>)}</div>
+          <div className="dc-repos">{filtered.map(repo => {
+            const history = state.connected?.selected_repositories.find(known => known.id === repo.id);
+            return <div key={repo.id} className="dc-repo"><div className="dc-repo-selection">
+              <Checkbox id={`repo-${repo.id}`} label={repo.name} description={repo.id} isChecked={selected.includes(repo.id)}
+                isDisabled={disabled} onChange={(_, checked) => { setSelected(old => checked ? [...old, repo.id] : old.filter(r => r !== repo.id)); setDirty(true); }} />
+              {history && <p className="dc-repo-history">Last synced: <FreshTime value={history.synced_at} /> · {exportLabel(history.export)}</p>}
+            </div><div className="dc-repo-labels">{state.profile.repositories.includes(repo.id) && <Label isCompact color="blue">Saved for mirroring</Label>}
+              {repo.enabled && <Label isCompact color="grey">Enabled on this host</Label>}</div></div>;
+          })}</div>
           <div className="dc-actions"><Button isDisabled={disabled || !selected.length} onClick={() => { void act(save, 'Repository profile saved'); }}>Save profile</Button>
             <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('preflight'); }}>Save &amp; check size</Button>
             <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('sync'); }}>Save &amp; sync snapshot</Button></div>
@@ -410,10 +554,14 @@ sudo dnf --disablerepo='*' --enablerepo='dc-*' upgrade --security --assumeno`}</
           </CardBody></Card> : <Card><CardBody>No snapshot has been published yet. Publish one to generate the client configuration.</CardBody></Card>}
         </>}
         {tab === 'snapshots' && <>
+          {!disconnected && <p className="dc-muted">Newest content first. Each snapshot retains its own export and verification record. Availability does not confirm transfer or disconnected import.</p>}
           {!state.snapshots.length && <Card><CardTitle>No validated snapshots yet</CardTitle><CardBody>{disconnected ? 'Import a transfer bundle to create the first snapshot.' : 'Complete a sync to create the first snapshot.'}</CardBody></Card>}
-          {state.snapshots.map(snapshot => <Card key={snapshot.id}><CardTitle><span>Snapshot {snapshot.id.slice(0, 8)}</span> <Label color="green">Validated</Label></CardTitle><CardBody>
+          {state.snapshots.map(snapshot => <Card key={snapshot.id}><CardTitle><span>{disconnected ? `Snapshot ${snapshot.id.slice(0, 8)}` : <>Content captured <Timestamp value={snapshot.created} /></>}</span> <Label color="green">Validated</Label></CardTitle><CardBody>
+            {!disconnected && <><p className="dc-muted">Snapshot {snapshot.id.slice(0, 8)} · {relativeTime(snapshot.created)}</p>
+              {state.connected?.selection_snapshot?.id === snapshot.id && <Label color="blue">Latest for saved selection</Label>}
+              {snapshot.export ? <ExportDetails bundle={snapshot.export} /> : <Alert variant="info" isInline title="Not exported yet">Build and verify a transfer bundle from this validated snapshot.</Alert>}</>}
             {state.publication?.current?.snapshot_id === snapshot.id && <Label color="blue">Currently published</Label>}
-            <p>{snapshot.imported ? 'Imported' : 'Created'} <Timestamp value={snapshot.created} /> · {bytes(snapshot.package_bytes)} of RPM content</p>
+            <p>{disconnected && <>{snapshot.imported ? 'Imported' : 'Created'} <Timestamp value={snapshot.created} /> · </>}{bytes(snapshot.package_bytes)} of RPM content</p>
             {snapshot.source_created && <p className="dc-muted">Bundle created on source <Timestamp value={snapshot.source_created} /></p>}
             {snapshot.verified_at && <p className="dc-muted">Content verified <Timestamp value={snapshot.verified_at} /></p>}
             <ul className="dc-snapshot-repos">{Object.entries(snapshot.repositories).map(([rid, result]) => <li key={rid}>
@@ -422,8 +570,8 @@ sudo dnf --disablerepo='*' --enablerepo='dc-*' upgrade --security --assumeno`}</
             {disconnected && <div className="dc-local-repos"><strong>Local repository URLs</strong>
               {Object.keys(snapshot.repositories).map(rid => <code key={rid}>{`file://${state.storage.path}/snapshots/${snapshot.id}/repositories/${rid}`}</code>)}</div>}
             {disconnected && <div className="dc-actions"><Button variant="secondary" isDisabled={disabled} onClick={() => { setPublishSnapshot(snapshot.id); setTab('publish'); }}>Publish over HTTP</Button></div>}
-            {!disconnected && <div className="dc-actions"><Button isDisabled={disabled} onClick={() => { void start('export', snapshot.id); }}>Build transfer bundle</Button>
-              <Button variant="secondary" isDisabled={disabled} onClick={() => { void start('verify-export', snapshot.id); }}>Verify existing bundle</Button></div>}
+            {!disconnected && <div className="dc-actions"><Button isDisabled={disabled} onClick={() => { void start('export', snapshot.id); }}>{snapshot.export ? 'Rebuild transfer bundle' : 'Build transfer bundle'}</Button>
+              <Button variant="secondary" isDisabled={disabled || !snapshot.export || snapshot.export.state === 'missing'} onClick={() => { void start('verify-export', snapshot.id); }}>Verify existing bundle</Button></div>}
           </CardBody></Card>)}
         </>}
         {tab === 'jobs' && <>

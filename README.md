@@ -80,12 +80,35 @@ Start with a small repository and a conservative snapshot budget.
 
 ## Connected cycle
 
-1. Select a repository in **Repositories** and save the profile.
-2. Run **Check size** and inspect the result.
-3. Run **Sync snapshot**. Return later to see the persisted job result.
-4. Open **Snapshots** and build a transfer bundle from a validated snapshot.
-5. Open **Jobs & evidence** for the server-side archive path and digest.
+The connected **Overview** is an operations dashboard. It shows the last
+successful sync and export with relative ages and exact local timestamps, a
+recommended next action, the saved selection's workflow, per-repository sync and
+export status, a matching size check, recent activity, and available storage.
+
+1. Select repositories in **Repositories**, set a budget, and save the profile.
+2. Run **Check saved selection size** and inspect the timestamped result.
+3. Run **Sync saved selection**. The workflow shows the operation's stage and
+   elapsed time; jobs continue in a system service if the browser is closed.
+4. Use **Build & verify transfer bundle** when the saved selection has a validated
+   snapshot. A new sync never inherits an older snapshot's export status.
+5. Open **Snapshots & exports** or **Show transfer files** for archive and checksum
+   paths, creation and verification times, file availability, and detailed evidence.
 6. Carry the `.tar` and matching `.tar.sha256` through the approved transfer process.
+   The connected host does not claim that transfer or disconnected import succeeded.
+
+Dashboard actions use the saved selection. Unsaved edits remain in the repository
+form until saved. Sync times describe when content was captured, not whether newer
+upstream packages exist. Size results are scoped to the saved selection and budget;
+each sync checks capacity again. **Activity & evidence** retains detailed job logs.
+
+Export records persist independently of the recent 50 jobs returned to the UI.
+Older successful export jobs are migrated without changing their export dates;
+legacy bundles require an explicit verification before being shown ready. The
+dashboard checks archive attributes and the checksum sidecar without hashing
+large archives every poll. Missing or changed files require verification or a
+rebuild. Explicit verification checks archive contents, snapshot identity, and
+the archive digest against its sidecar; it updates verification time while
+preserving the original export time.
 
 The source host's enabled repositories are preserved. Each command enables only
 the profile's repositories for that invocation. The application does not export

@@ -108,3 +108,31 @@ and the same platform. DNF operations explicitly select only that publication's
 repository IDs. Both plays use serial execution and stop on a host failure.
 Cockpit never executes the generated playbooks, stores remote credentials, or
 claims external playbook runs as local job evidence. AAP integration is deferred.
+
+## Connected operations dashboard
+
+Connected status derives its workflow from the saved repository IDs, validated
+snapshots, durable export records, and relevant job attempts. The latest global
+sync and export remain visible independently of the latest snapshot matching the
+saved selection. Per-repository history can show older available content without
+implying that a newly saved selection has been synced. Size results match both
+repository selection and budget. Dashboard sync/preflight actions do not save
+unsaved frontend drafts.
+
+`export-records/<snapshot-id>.json` retains the latest export and verification
+for each archive, independently of the UI's 50-job history window. Export jobs
+persist the record after archive verification and promotion. Existing successful
+export jobs backfill missing records under the engine lock; their historical
+export dates are retained and their file fingerprint remains unknown until an
+explicit verification. Migration does not rehash or certify files on a status poll.
+
+Availability inspects regular-file presence, size, checksum-sidecar contents, and
+the recorded size/mtime/ctime/inode/device fingerprint. It is an inexpensive
+change detector, not a fresh content checksum. Verification streams every archive
+member, checks the expected snapshot ID and archive SHA-256 against its sidecar
+and prior export record, and records a new fingerprint without advancing export
+time. Missing files, changed attributes, old unverifiable history, and failed
+integrity checks are surfaced as actions. Export and checksum promotion are not
+one filesystem transaction; an interrupted replacement is detected by mismatched
+records/files and must be rebuilt. Physical transfer and remote import are never
+inferred from export completion.

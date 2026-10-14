@@ -112,6 +112,67 @@ try {
     console.log('GUI rejected an invalid source, saved and scanned the selected directory, persisted it across reload, and displayed bundle timestamps');
   }
   await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+  if (process.argv.includes('--check-connected')) {
+    if (disconnected || !initialState.connected) throw new Error('Connected dashboard backend required');
+    const status = () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
+    await expect(app.locator('.dc-freshness').getByText('Last successful sync', { exact: true })).toBeVisible();
+    await expect(app.getByRole('list', { name: 'Saved selection workflow' })).toBeVisible();
+    const originalExport = initialState.connected.latest_export;
+    if (initialState.connected.phase === 'verify') {
+      const previous = initialState.jobs.map(job => job.id);
+      await app.getByRole('button', { name: 'Verify existing bundle', exact: true }).click();
+      await expect.poll(async () => (await status()).jobs.find(job => job.operation === 'verify-export' && !previous.includes(job.id))?.status,
+        { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+      expect((await status()).connected.latest_export.exported_at).toBe(originalExport.exported_at);
+      await expect(app.getByText('Verified bundle ready for transfer', { exact: true })).toBeVisible({ timeout: 15000 });
+    }
+    if (process.argv.includes('--run-dashboard-cycle')) {
+      const before = await status();
+      if (before.profile.repositories.length !== 1 || before.profile.max_gib > 5)
+        throw new Error('Live dashboard cycle requires a single repository and budget <= 5 GiB');
+      const previous = before.jobs.map(job => job.id);
+      await app.getByRole('button', { name: 'Check saved selection size', exact: true }).click();
+      let sized;
+      await expect.poll(async () => {
+        sized = (await status()).jobs.find(job => job.operation === 'preflight' && !previous.includes(job.id));
+        return sized?.status;
+      }, { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+      if (!sized.plan.within_budget || !sized.plan.enough_space || sized.plan.package_bytes > 1024 ** 3)
+        throw new Error('Live sync test is limited to content under 1 GiB that fits the saved budget/storage');
+      await expect(app.getByRole('button', { name: 'Sync saved selection', exact: true })).toBeVisible({ timeout: 15000 });
+      await app.getByRole('button', { name: 'Sync saved selection', exact: true }).click();
+      let synced;
+      await expect.poll(async () => {
+        synced = (await status()).jobs.find(job => job.operation === 'sync' && !previous.includes(job.id));
+        return synced?.status;
+      }, { timeout: 240000, intervals: [1000, 2000, 4000] }).toBe('succeeded');
+      await expect(app.getByText('Build a transfer bundle', { exact: true })).toBeVisible({ timeout: 15000 });
+      const afterSync = await status();
+      expect(afterSync.connected.selection_snapshot.id).toBe(synced.snapshot_id);
+      expect(afterSync.connected.selection_snapshot.export).toBeNull();
+      expect(afterSync.connected.latest_export.snapshot_id).not.toBe(synced.snapshot_id);
+      await page.screenshot({ path: '.local/cockpit-connected-awaiting-export.png', fullPage: true });
+      await app.getByRole('button', { name: 'Build & verify transfer bundle', exact: true }).click();
+      let exported;
+      await expect.poll(async () => {
+        exported = (await status()).jobs.find(job => job.operation === 'export' && job.snapshot_id === synced.snapshot_id);
+        return exported?.status;
+      }, { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+      await expect(app.getByText('Verified bundle ready for transfer', { exact: true })).toBeVisible({ timeout: 15000 });
+      const afterExport = await status();
+      expect(afterExport.connected.selection_snapshot.export.state).toBe('available');
+      expect(afterExport.connected.latest_export.snapshot_id).toBe(synced.snapshot_id);
+      expect(afterExport.profile).toEqual(initialState.profile);
+      await writeFile('.local/dashboard-cycle.json', JSON.stringify({ sync: synced, export: exported, connected: afterExport.connected }, null, 2));
+    }
+    await page.screenshot({ path: '.local/cockpit-connected-dashboard.png', fullPage: true });
+    await app.getByRole('button', { name: 'Show transfer files', exact: true }).click();
+    await expect(app.getByLabel('Transfer bundle details', { exact: true }).first()).toContainText('.tar.sha256');
+    await page.screenshot({ path: '.local/cockpit-connected-exports.png', fullPage: true });
+    await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+    console.log('Connected dashboard, durable historical export, preserved export age, saved selection, workflow transitions, and transfer-file details passed');
+  }
   if (process.argv.includes('--check-automation')) {
     if (!disconnected || !initialState.publication?.current) throw new Error('Publish a snapshot before checking automation downloads');
     const publication = initialState.publication.current;
@@ -220,7 +281,7 @@ try {
     if (before.profile.max_gib > 1 || before.profile.repositories.length !== 1)
       throw new Error('Browser cycle requires one preselected repository with a budget of at most 1 GiB');
     const previous = before.jobs.map(j => j.id);
-    await app.getByRole('button', { name: 'Sync snapshot', exact: true }).click();
+    await app.getByRole('button', { name: 'Sync saved selection', exact: true }).click();
     let started;
     await expect.poll(async () => {
       started = (await status()).jobs.find(j => j.operation === 'sync' && !previous.includes(j.id));
@@ -247,7 +308,7 @@ try {
     }, { timeout: 30000, intervals: [1000] }).toBe('succeeded');
     await writeFile('.local/browser-cycle.json', JSON.stringify({ sync: started.id, export: exported }, null, 2));
     console.log('Browser-started CDN sync survived page closure; snapshot export and archive verification passed');
-    await app.getByRole('tab', { name: 'Jobs & evidence', exact: true }).click();
+    await app.getByRole('tab', { name: disconnected ? 'Jobs & evidence' : 'Activity & evidence', exact: true }).click();
     await page.screenshot({ path: '.local/cockpit-jobs.png', fullPage: true });
     await app.getByRole('tab', { name: 'Overview', exact: true }).click();
   }
