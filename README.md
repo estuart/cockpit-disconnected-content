@@ -1,323 +1,168 @@
 # Disconnected Content for Cockpit
 
-A prototype for building, validating, exporting, and importing RPM repository
-snapshots through the RHEL web console. Install the connected role on a registered
-RHEL sync host and the disconnected role on a separate RHEL system.
+Mirror RPM repositories on a connected RHEL host, carry a verified bundle across
+the air gap, and import and publish that content through the RHEL web console.
+The disconnected host also generates client repository configuration and Ansible
+playbooks for configuring repositories and applying security updates.
 
-## Prototype capabilities
+**Prototype 0.10.0.** Tested on RHEL 10.2 x86_64. Transfer manifests are currently
+unsigned and imports require explicit administrator opt-in. RPM signature checks
+remain mandatory. This is an independently maintained prototype; running inside
+Cockpit does not create a Red Hat product support commitment. Operators remain
+responsible for subscriptions, content access, and their transfer policy.
 
-- Cockpit UI with repository selection, a snapshot size budget, and storage checks.
-- Size preflight using DNF's declared package sizes before every sync.
-- Full repository sync with original metadata and forced RPM signature checking.
-- Persistent systemd jobs that continue when a browser tab is closed.
-- Metadata checksums, referenced RPM checksums, trusted RPM signature validation,
-  and required advisory metadata for BaseOS/AppStream.
-- Versioned snapshots, uncompressed tar transfer bundles, per-file manifests,
-  archive read-back verification, and SHA-256 sidecars.
-- Job history, local command output, and explicit failed/interrupted states.
-- A disconnected transfer inbox with bounded archive validation, compatibility
-  checks, independent RPM signature checks, and atomic snapshot visibility.
-- A GUI-configured bundle source directory with newest-first file timestamps,
-  job lifecycle times, elapsed duration, and timestamped verification evidence.
-- A host directory picker with folder navigation, breadcrumbs, filtering, and
-  shortcuts to mounted filesystems and common transfer locations.
-- Optional Apache publication with separately verified public copies, immutable
-  snapshot URLs, and generated client `.repo` files and setup commands.
+[Install and select a role](docs/installation.md) ·
+[Operator guide](docs/operator-guide.md) ·
+[Client automation](docs/automation-options.md) ·
+[Build and contribute](docs/development.md) ·
+[Validation](docs/validation.md) ·
+[Limitations](docs/limitations.md)
 
-Incremental transfers, signed bundle manifests, and remote fleet patching are
-not implemented. This is an independently maintained prototype;
-the extension does not acquire a Red Hat product support commitment by running
-inside Cockpit. RHEL subscriptions and access rights remain the operator's responsibility.
+## One application, two host roles
 
-## Build and test
+**Both modes live in this repository and ship in the same main RPM.** The
+root-owned `/etc/disconnected-content/config.json` selects the host's role.
+The optional publisher RPM adds Apache configuration and its dependencies.
 
-The frontend is compiled on a build machine. Runtime hosts do not need npm.
+| Host purpose | Configuration | Packages |
+| --- | --- | --- |
+| Mirror and export content | `"role": "connected"` | `cockpit-disconnected-content` |
+| Import content inside the air gap | `"role": "disconnected"` | `cockpit-disconnected-content` |
+| Import and serve repositories to clients | `"role": "disconnected"` | Main RPM plus `cockpit-disconnected-content-publisher` |
+| Consume published repositories | Generated `.repo` and approved public keys | No extension installation required |
 
-```sh
-npm ci
-npm run typecheck
-npm run build
-python3 -m unittest discover -s tests -v
+The backend enforces the configured role. Installing the publisher does not
+change the role, start publication, open firewall ports, or configure clients.
+Network isolation remains an operating-system and network-policy responsibility.
+
+```mermaid
+flowchart LR
+    U[Configured RPM repositories] --> C[Connected host: sync and export]
+    C --> B[Bundle with metadata, RPMs, and public keys]
+    B -->|Approved transfer process plus SHA-256 sidecar| D[Disconnected host: review and import]
+    D --> P[Optional publisher on the disconnected host]
+    P --> H[RHEL clients inside the air gap]
 ```
 
-On a RHEL build machine with RPM build tools, GNU make, and GNU tar:
+Today, installation uses DNF and role configuration; there is no role-selecting
+installer script. We recommend retaining one application RPM and the optional
+publisher, then adding a setup command with an explicit role choice. See the
+[current packaging and proposed setup interface](docs/deployment-design.md).
 
-```sh
-make rpm
-sudo dnf install ./build/rpmbuild/RPMS/noarch/cockpit-disconnected-content-*.rpm
-sudo systemctl enable --now cockpit.socket
-```
+## Get started
 
-The RPM contains compiled frontend assets. `make dist` creates a portable source
-archive using Python; the target build host needs RPM build tools and GNU make.
+1. **Build the RPMs** using the [development guide](docs/development.md), or obtain
+   matching artifacts from your approved build process. Prebuilt GitHub releases
+   are not currently published.
+2. **Install the main RPM on both hosts**, and the optional publisher only where
+   repositories will be served. Provision all runtime dependencies before
+   isolating the disconnected host, or use an approved offline bootstrap repository.
+3. **Choose the role and storage** in the root-owned configuration. A fresh
+   installation defaults to connected mode; set the disconnected host explicitly.
+   Review the separate unsigned-manifest prototype opt-in before enabling imports.
+4. Enable `cockpit.socket`, open your host's web console, and select
+   **Disconnected Content** with administrative access.
+5. Start with one small repository, complete the workflow below, and configure a
+   canary client before expanding the rollout.
 
-Open the existing RHEL web console and select **Disconnected Content**. Use an
-account authorized for administrative access. The prototype deliberately requires
-administrative access for all backend calls.
+[Installation instructions](docs/installation.md) include exact package selection,
+connected/disconnected configuration examples, offline prerequisites, upgrades,
+and storage planning. Runtime hosts do not need Node.js or npm.
 
-## Storage configuration
+## Connected workflow
 
-The root-owned `/etc/disconnected-content/config.json` selects the local state and
-content directory. Choose a filesystem sized for repository content plus exports:
+Select repositories and a snapshot budget, check capacity, sync and validate the
+content, then **Build & verify transfer bundle**. The dashboard shows independent
+sync/export ages, per-repository status, the next action, and recent activity.
+Long operations run as systemd jobs and continue if the browser closes.
 
-```json
-{
-  "role": "connected",
-  "state_dir": "/srv/disconnected-content",
-  "reserve_gib": 5
-}
-```
+![Connected operations dashboard with repository freshness and a visible transfer workflow](docs/screenshots/connected-dashboard.png)
 
-Keep this file owned by root with mode `0644` or stricter. Let the engine create
-the state directory, or precreate it owned by root with mode `0700`. Do not use a
-directory writable by other users. Configure storage before the first job; moving
-existing state is an administrator task, not an automatic migration.
+Transfer the `.tar` and its matching `.tar.sha256` together through your approved
+process. Exports include original repository metadata, RPMs, and public signing
+keys from configured `gpgkey` sources. They exclude subscription certificates,
+repository configuration, credentials, and local logs. The connected host does
+not claim that a transfer or disconnected import succeeded.
 
-The size check estimates declared RPM bytes plus a full export and working
-allowance. It is not a storage quota and cannot predict concurrent use by other
-workloads. DNF metadata caches also consume space on their configured filesystem.
-Start with a small repository and a conservative snapshot budget.
+[Connected cycle and export evidence](docs/operator-guide.md#connected-cycle)
 
-## Connected cycle
+## Disconnected workflow
 
-The connected **Overview** is an operations dashboard. It shows the last
-successful sync and export with relative ages and exact local timestamps, a
-recommended next action, the saved selection's workflow, per-repository sync and
-export status, a matching size check, recent activity, and available storage.
+Choose the transfer folder or mounted media in **Incoming bundles**, inspect any
+bundled signing keys, approve the required keys, and import the bundle. Then
+publish a validated snapshot and open **Client setup**. The dashboard keeps import,
+publication, and client-configuration steps visible, with separate timestamps.
 
-1. Select repositories in **Repositories**, set a budget, and save the profile.
-2. Run **Check saved selection size** and inspect the timestamped result.
-3. Run **Sync saved selection**. The workflow shows the operation's stage and
-   elapsed time; jobs continue in a system service if the browser is closed.
-4. Use **Build & verify transfer bundle** when the saved selection has a validated
-   snapshot. A new sync never inherits an older snapshot's export status.
-5. Open **Snapshots & exports** or **Show transfer files** for archive and checksum
-   paths, creation and verification times, file availability, and detailed evidence.
-6. Carry the `.tar` and matching `.tar.sha256` through the approved transfer process.
-   The connected host does not claim that transfer or disconnected import succeeded.
+![Disconnected operations dashboard showing import, publication, and client setup](docs/screenshots/disconnected-dashboard.png)
 
-Dashboard actions use the saved selection. Unsaved edits remain in the repository
-form until saved. Sync times describe when content was captured, not whether newer
-upstream packages exist. Size results are scoped to the saved selection and budget;
-each sync checks capacity again. **Activity & evidence** retains detailed job logs.
+The directory picker browses folders on the disconnected host. Only the saved
+folder is scanned. A failed import retains diagnostics and does not expose a
+partial snapshot. Publishing creates a separately verified public copy; older
+snapshot URLs remain available when the current publication advances.
 
-Export records persist independently of the recent 50 jobs returned to the UI.
-Older successful export jobs are migrated without changing their export dates;
-legacy bundles require an explicit verification before being shown ready. The
-dashboard checks archive attributes and the checksum sidecar without hashing
-large archives every poll. Missing or changed files require verification or a
-rebuild. Explicit verification checks archive contents, snapshot identity, and
-the archive digest against its sidecar; it updates verification time while
-preserving the original export time.
+[Transfer inbox and directory picker](docs/operator-guide.md#disconnected-import) ·
+[Incoming bundle screenshot](docs/screenshots/incoming-bundles.png)
 
-The source host's enabled repositories are preserved. Each command enables only
-the profile's repositories for that invocation. The application does not export
-subscription certificates, repository configuration, or local job logs.
+## Bundled keys require approval
 
-Bundles are **unsigned** in this version. Their hashes detect content corruption;
-they do not establish who produced the bundle. RPM signatures remain independently
-verified against approved repository keys, or the host's existing RPM keyring
-when no repository-specific keys are configured. Do not treat a transferred key
-and an accompanying bundle as an independent trust anchor.
+Choose **Review bundled keys** to verify the archive and stage included keys as
+untrusted candidates. **Review bundled public key** shows the identity, full
+fingerprint, expiration, and source bundle. Verify the fingerprint independently,
+confirm it, and explicitly approve the key for its repository before importing.
 
-## Repository signing keys
+![Signing-key confirmation with the approval button disabled until explicit confirmation](docs/screenshots/signing-key-review.png)
 
-Exports now include public keys from each mirrored repository's configured
-`gpgkey` sources (`file://` or HTTPS). Files with multiple public certificates
-are split into individual bounded certificates. Only public certificate packets
-are accepted; private keys, credentials, repository configuration, and source URLs
-are excluded from the collected key payload. Export fails clearly if a configured
-key source cannot be collected. Repositories with no configured key source include
-no key; existing host trust or separately supplied public keys remain available.
+Including a key in a bundle, inspecting an archive, and viewing a fingerprint do
+not grant trust. Existing approvals remain in effect. Imports pin approved keys;
+publication revalidates packages with those keys and carries them into client
+setup. Unsigned RPMs and invalid signatures are blocked. Bundled keys are not
+silently added to the host-wide RPM database.
 
-On the disconnected side, choose **Incoming bundles → Review bundled keys**.
-The app verifies the archive sidecar and every declared file checksum, then stages
-the included keys as **Untrusted candidates**. Select **Review bundled public key**
-to see the full fingerprint and confirm approval. Inspecting the archive and
-viewing a key never enroll it. Previously approved keys remain approved; bundled
-copies do not overwrite existing trust. The manifest includes repository-to-key
-paths and SHA-256 values, with no trust or approval assertion. Older bundles
-without key entries remain supported. Rebuild an export to include the new keys;
-existing transfer files do not gain keys retroactively.
+[Signing-key workflow and trust model](docs/operator-guide.md#repository-signing-keys) ·
+[Untrusted candidate screenshot](docs/screenshots/bundled-key-candidates.png)
 
-For third-party or internal content with a separately supplied public key, use
-**Signing keys** on the disconnected host:
+## Publish and configure clients
 
-1. Place one ASCII-armored public key (`.asc`, `.key`, or `.pub`, at most 64 KiB)
-   in the saved transfer folder and scan again, or select a file on your computer
-   or paste its contents. Keys are never fetched from the internet by the importer.
-2. Specify the exact repository ID from the incoming bundle or failed import.
-   Choose **Review public key** to see its identity, full fingerprint, expiration,
-   and key-file SHA-256. Review does not grant trust.
-3. Verify the full fingerprint against an approved vendor source or trusted record.
-   Confirm the checkbox and choose **Approve signing key** within 15 minutes.
-   Changing the repository or supplied key invalidates the displayed review.
-4. Return to **Incoming bundles** and retry the import. A missing key is reported
-   separately from unsigned RPMs, invalid signatures, and other verification errors.
-   RPM diagnostics are retained in **Activity & evidence**.
+The optional Apache publisher serves pinned snapshot repositories and reviewed
+public keys. **Client setup** provides a `.repo` file, public-key downloads, setup
+commands, and four paired automation downloads:
 
-Approval is an administrative action scoped to the repository inside the extension.
-Validation uses an isolated RPM database containing only that repository's approved
-keys; it does not enroll them in this host's system-wide RPM keyring. Without an
-approved key set, existing RPM trust is used. Private, expired, revoked, malformed,
-and multiple-primary-key uploads are rejected. No signature bypass is provided.
+| Download | Purpose |
+| --- | --- |
+| `configure-repos.yml` | Verify full key fingerprints, enroll approved keys, install the pinned repository file, and refresh metadata |
+| `security-updates.yml` | Check pinned key/configuration files and apply security updates from the selected repositories |
+| `inventory.ini` | Example inventory to replace with your approved client hosts |
+| `README-client-automation.txt` | Prerequisites, preview/apply commands, and rollout instructions |
 
-Successful imports pin the approved public key bytes, full fingerprints, SHA-256,
-and approval timestamps in snapshot evidence. Publication rechecks RPM signatures
-with the pinned keys and serves the exact public key files under
-`/disconnected-content/snapshots/<snapshot-id>/keys/<fingerprint>.asc`.
-The generated `.repo` references dedicated local files in `/etc/pki/rpm-gpg/`.
-**Client setup** provides public-key downloads, published URLs, fingerprints,
-checksums, and manual setup commands. Review the fingerprints and checksum results
-before enrolling keys; do not treat the download server as an independent trust anchor.
+![Client automation downloads and preview commands, including the advisory-metadata prerequisite](docs/screenshots/client-automation.png)
 
-The paired `configure-repos.yml` embeds those exact public keys and enrolls them
-after explicit full fingerprint checks before refreshing DNF.
-This changes the client's system-wide RPM trust and must be reviewed with the playbook.
-Clients need `gnupg2` for full fingerprint verification; provision it from approved
-installation media before running the playbook.
-Check mode previews files and skips enrollment and metadata refresh. The security
-playbook checks the pinned public-key files and repository configuration before
-updating. `gpgcheck=1` and `disable_gpg_check=false` remain enabled. Repositories
-without reviewed keys retain the independently provisioned Red Hat key file.
+Playbooks run from your existing Ansible control node. They process one host at
+a time, stop on failure, keep package signature checks enabled, and do not reboot
+clients. Reviewed-key setup needs `gnupg2` on clients. Security-only updates need
+`updateinfo` in every selected repository; a repository without advisories can
+still be configured, but its security playbook stops with an explanation.
 
-## Disconnected import
+Cockpit does not execute fleet jobs, hold client credentials, or mark clients
+configured just because files were downloaded. AAP integration remains planned.
 
-The disconnected **Overview** follows **Choose source → Import & validate →
-Publish content → Configure clients**. It shows independent import/publication
-ages, the next action, pending inbox files, imported repository status, local
-publication availability, and recent activity. Client setup remains a manual
-step and is never marked complete because files were downloaded.
+[Publication and client setup](docs/operator-guide.md#publish-and-configure-client-hosts) ·
+[Ansible prerequisites and rollout](docs/automation-options.md)
 
-**Publish content** holds web-server settings and the explicit snapshot
-publication action. **Client setup** contains the recorded publication's `.repo`
-file, setup commands, paired Ansible playbooks, inventory, and instructions.
-Changing the saved server URL requires reviewing and republishing; draft edits
-are not saved by dashboard navigation. Unmounted transfer media does not block
-using content that is already imported and published.
+## Documentation and project status
 
-Install the application and its runtime dependencies before isolating the host,
-or provide them through an approved offline bootstrap repository. The importer
-does not download packages or require access to the sync host.
+All screenshots show the real frontend with **generic demo data**, fixed UTC
+timestamps, example repositories, and placeholder fingerprints. They do not show
+customer systems or actual keys to trust. See [screenshot regeneration](docs/development.md#reproduce-documentation-screenshots).
 
-Configure the root-owned `/etc/disconnected-content/config.json` for this role:
+- [Installation and role configuration](docs/installation.md)
+- [Operator procedures and troubleshooting](docs/operator-guide.md)
+- [Packaging decision and proposed setup command](docs/deployment-design.md)
+- [Backend architecture and trust boundaries](docs/architecture.md)
+- [Validation evidence and tested boundaries](docs/validation.md)
+- [Prototype limitations](docs/limitations.md)
 
-```json
-{
-  "role": "disconnected",
-  "state_dir": "/var/lib/disconnected-content",
-  "reserve_gib": 5,
-  "max_import_gib": 200,
-  "allow_unsigned_imports": false
-}
-```
-
-This version produces unsigned bundles. Import is rejected by default. For an
-explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
-administrator. This does not authenticate the manifest; RPM signatures are still
-required and validated against approved repository keys or the existing host keyring.
-
-1. Open **Incoming bundles**, choose **Browse folders**, and navigate to the
-   transfer folder on the disconnected host. Mounted drives appear under
-   **Mounted filesystems**; **Quick locations** includes the saved source,
-   filesystem root, and existing common mount directories. Use breadcrumbs,
-   **Up one folder**, and the folder filter to navigate, then choose
-   **Use this folder**. You can also enter an absolute path directly.
-2. Choose **Save & scan** to persist the source. Stage the `.tar` and matching
-   `.tar.sha256` there using the approved transfer process, then **Scan now**.
-   The source must be a real directory without symlink components. Only that
-   directory is scanned; subdirectories are not searched. Browsing and choosing
-   a folder do not change the saved source until **Save & scan** is selected.
-   Mounting media and transferring files are currently administrator tasks
-   outside the application.
-3. Choose **Import bundle**. The application never imports automatically.
-4. Follow the job under **Activity & evidence**. A failed import leaves no usable
-   snapshot and removes its private extraction staging directory.
-5. Open **Snapshots** for validation results and local `file://` repository URLs.
-
-The importer checks the outer checksum, manifest schema, size/file-count limits,
-safe paths, file checksums, RHEL major version, architecture, repository metadata,
-and trusted RPM signatures. Archive ownership, modes, links, special files, sparse
-files, duplicate members, and unexpected paths are not accepted or applied.
-An identical bundle can be imported again without duplicating or replacing its
-snapshot. Publishing and client rollout are explicit subsequent steps.
-
-The source directory is separate from managed snapshot storage. The GUI saves
-only `incoming_dir` and its settings timestamp in the root-owned configuration;
-it cannot change the role, state directory, size limits, or unsigned-import policy.
-Saving does not create, move, delete, or change permissions on source files.
-It requires administrative access and is blocked while a job is active. Each
-import records its selected source directory in the job. Missing media is shown
-as unavailable without hiding existing snapshots or job history.
-
-Incoming bundles are sorted by filesystem modification time, newest first.
-Copying may preserve this time, so it is not an arrival timestamp. Jobs show
-queued, started, last-updated, and finished times where recorded, plus duration.
-Successful archive checks record a verification timestamp; identical reimports
-record when the archive matched the existing snapshot. Imported snapshots also
-show their import time and source bundle creation time. Dates include the
-browser's local timezone; hovering a timestamp reveals its original ISO value.
-Older records retain the evidence they actually captured without invented dates.
-
-## Publish and configure client hosts
-
-Install the optional `cockpit-disconnected-content-publisher` RPM and its Apache
-dependencies on the disconnected host before isolation or from an offline
-bootstrap repository. Connected sync hosts do not need this subpackage.
-
-1. Open **Publish content**, enter the server URL clients can reach, such as
-   `http://mirror.example.org`, and select **Save server URL**.
-2. Select an imported, validated snapshot and choose **Publish snapshot**. This
-   creates a separate copy of indexed repository metadata and RPMs under
-   `/var/www/disconnected-content/public/snapshots/<snapshot-id>/`, verifies it,
-   applies SELinux labels, checks Apache configuration, and starts the server.
-3. Permit inbound TCP port 80 from approved client networks through your firewall
-   policy. Publication does not modify firewall rules or network isolation.
-4. Download the displayed `.repo` file and install it on compatible client hosts
-   as `/etc/yum.repos.d/disconnected-content.repo`. Review the displayed setup
-   commands to refresh metadata, inspect security advisories, and preview updates.
-
-The GUI shows the current publication and timestamp, complete configuration, and
-client commands. Package GPG checks stay enabled, with keys provisioned and
-reviewed before enrollment on clients. The configuration playbook enrolls approved
-repository keys with full fingerprint checks. Original repository metadata is not signed by
-this prototype (`repo_gpgcheck=0`). The default Apache setup provides HTTP; HTTPS
-and certificate trust require separately configured TLS. Entering an HTTPS URL
-does not configure the server's TLS listener.
-
-Every generated repository URL pins a specific published snapshot. Publishing
-new content updates `/disconnected-content/client.repo`, while older snapshot
-URLs remain usable. Existing clients advance only when an administrator installs
-the newer configuration. This avoids changing repository content during an
-in-progress package transaction. Switching repositories does not undo installed
-updates. HTTP content is readable by hosts allowed through the network policy;
-web-client authentication is not included in the initial publisher.
-
-Publication copies repository content rather than exposing private engine state.
-It requires additional storage for the public copy; the reserve is checked on
-the publication filesystem. Logs, jobs, inbox archives, snapshot state files, and
-unindexed files are excluded. Private staging is outside the Apache alias.
-
-The **Client setup** tab provides repository configuration, two downloadable playbooks,
-an example inventory, and run instructions. Configure a canary client's pinned
-repositories, preview security updates with `--check --diff`, then apply during
-a maintenance window. The update playbook requires the exact paired repository
-file and advisory metadata, selects only its publication's repository IDs, runs
-one host at a time, and stops on failure. Neither playbook reboots clients.
-
-Run the downloads from your existing Ansible Core 2.16+ control node. Cockpit does
-not store client credentials or execute Ansible. See [client automation](docs/automation-options.md)
-for prerequisites, commands, and the later AAP integration direction.
-
-## Development and publication hygiene
-
-Keep hostnames, addresses, SSH aliases, credentials, entitlement files, mirror
-content, screenshots of real inventories, local logs, and deployment notes out
-of Git. `.local/` is ignored for machine-specific working notes. Use generic
-examples in issues and pull requests. Review staged content before every commit.
-
-No open-source license grant has been selected yet. Select a license and review
-third-party notices before a public release. Generated frontend bundles preserve
-dependency license notices.
-
-See [architecture](docs/architecture.md) and [prototype limitations](docs/limitations.md).
+Signed manifests, incremental transfers, automated key lifecycle management, and
+AAP job execution are future work. No open-source license grant has been selected
+yet; choose a license and review dependency notices before making a public release.
+Keep environment-specific data in ignored local files and use generic examples
+in commits, issues, and pull requests.
