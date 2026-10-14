@@ -75,18 +75,23 @@ try {
     if (!bundle) throw new Error('Set COCKPIT_TEST_BUNDLE to the staged test archive name');
     await app.getByRole('tab', { name: 'Incoming bundles', exact: true }).click();
     const row = app.locator('.dc-repo').filter({ hasText: bundle });
+    const previousJobs = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })).jobs.map(j => j.id));
     await row.getByRole('button', { name: 'Import bundle', exact: true }).click();
+    let imported;
     await expect.poll(async () => {
       const state = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
         ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
-      return state.jobs.find(j => j.operation === 'import' && j.bundle_name === bundle)?.status;
+      imported = state.jobs.find(j => j.operation === 'import' && j.bundle_name === bundle && !previousJobs.includes(j.id));
+      return imported?.status;
     }, { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
     await app.getByRole('tab', { name: /^Snapshots/ }).click();
     await expect(app.getByText('Local repository URLs', { exact: true }).first()).toBeVisible({ timeout: 15000 });
     await page.screenshot({ path: '.local/cockpit-import.png', fullPage: true });
     await app.getByRole('tab', { name: 'Jobs & evidence', exact: true }).click();
     await expect(app.getByText(/Evidence verified|Archive matched existing snapshot/).first()).toBeVisible({ timeout: 15000 });
-    const latestJob = app.locator('.pf-v6-c-card').first();
+    const latestJob = app.locator('.pf-v6-c-card').filter({ hasText: `Job ${imported.id}` });
+    await expect(latestJob).toBeVisible({ timeout: 15000 });
     for (const label of ['Queued', 'Started', 'Last updated', 'Finished', 'Duration']) {
       await expect(latestJob.locator('dt').filter({ hasText: new RegExp(`^${label}$`) })).toBeVisible();
     }
@@ -139,6 +144,9 @@ try {
 } finally {
   if (restoreSource && app) {
     try {
+      await expect.poll(async () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+        ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' }))
+        .jobs.some(job => ['queued', 'running'].includes(job.status))), { timeout: 120000 }).toBe(false);
       await app.evaluate(async path => {
         const process = window.cockpit.spawn(['/usr/libexec/disconnected-content', 'save-import-settings'],
           { superuser: 'require', err: 'message' });
