@@ -16,7 +16,8 @@ type Snapshot = { id: string; created: string; status: string; package_bytes: nu
 type State = { version: string; role: string; os: { name: string; major: string; arch: string };
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
-  jobs: Job[]; snapshots: Snapshot[] };
+  jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; has_checksum: boolean }[];
+  capabilities: { allow_unsigned_imports: boolean } };
 type CockpitProcess = Promise<string> & { input: (data: string) => void };
 declare global { interface Window { cockpit: {
   spawn: (args: string[], opts: Record<string, unknown>) => CockpitProcess;
@@ -84,6 +85,7 @@ function App() {
     finally { setBusy(false); }
   };
   const active = state?.jobs.find(j => ['queued', 'running'].includes(j.status));
+  const disconnected = state?.role === 'disconnected';
   const latestPlan = state?.jobs.find(j => j.plan)?.plan;
   const disabled = busy || Boolean(active);
   const save = async () => {
@@ -101,7 +103,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">Connected side</Label><Label color="orange">Prototype {state?.version ?? '0.1.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.2.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -110,7 +112,8 @@ function App() {
       <div className="dc-host">{state.os.name} · {state.os.arch} · {state.storage.path}</div>
       <Tabs activeKey={tab} onSelect={(_, key) => setTab(key)} aria-label="Disconnected content sections">
         <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
-        <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />
+        {!disconnected && <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />}
+        {disconnected && <Tab eventKey="incoming" title={<TabTitleText>Incoming bundles</TabTitleText>} />}
         <Tab eventKey="snapshots" title={<TabTitleText>Snapshots <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
         <Tab eventKey="jobs" title={<TabTitleText>Jobs &amp; evidence</TabTitleText>} />
       </Tabs>
@@ -119,8 +122,9 @@ function App() {
           <div className="dc-stats">
             <Card><CardTitle>Available storage</CardTitle><CardBody><div className="dc-metric">{bytes(state.storage.free)}</div>
               <p>{bytes(state.storage.reserve)} reserved for the operating system and other workloads</p></CardBody></Card>
-            <Card><CardTitle>Repository profile</CardTitle><CardBody><div className="dc-metric">{state.profile.repositories.length} {state.profile.repositories.length === 1 ? 'repository' : 'repositories'}</div>
-              <p>{state.profile.max_gib} GiB maximum declared RPM content per snapshot</p></CardBody></Card>
+            <Card><CardTitle>{disconnected ? 'Incoming transfer bundles' : 'Repository profile'}</CardTitle><CardBody><div className="dc-metric">
+              {disconnected ? state.incoming.length : `${state.profile.repositories.length} ${state.profile.repositories.length === 1 ? 'repository' : 'repositories'}`}</div>
+              <p>{disconnected ? 'Archives staged locally for verification and import' : `${state.profile.max_gib} GiB maximum declared RPM content per snapshot`}</p></CardBody></Card>
             <Card><CardTitle>Validated snapshots</CardTitle><CardBody><div className="dc-metric">{state.snapshots.length}</div>
               <p>Only completed, verified snapshots can be exported</p></CardBody></Card>
           </div>
@@ -128,10 +132,10 @@ function App() {
             {active ? <div className="dc-current"><Spinner size="md" /><div><strong>{active.operation}</strong><p>{active.stage}</p>
               <small>Runs in a system service. You can close this page and return later.</small></div>
               <Button variant="danger" isDisabled={busy} onClick={() => { void act(() => call(['cancel', active.id])); }}>Stop job</Button></div> : <>
-              <p>Choose repositories, check their size, then sync a complete snapshot with the original metadata.</p>
-              <div className="dc-actions"><Button onClick={() => setTab('profile')}>Configure repositories</Button>
+              <p>{disconnected ? 'Review a transferred bundle, verify its contents, and import a complete snapshot.' : 'Choose repositories, check their size, then sync a complete snapshot with the original metadata.'}</p>
+              {disconnected ? <div className="dc-actions"><Button onClick={() => setTab('incoming')}>Review incoming bundles</Button></div> : <div className="dc-actions"><Button onClick={() => setTab('profile')}>Configure repositories</Button>
                 <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('preflight'); }}>Check size</Button>
-                <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('sync'); }}>Sync snapshot</Button></div></>}
+                <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('sync'); }}>Sync snapshot</Button></div>}</>}
           </CardBody></Card>
           {latestPlan && <Card><CardTitle>Latest size preflight</CardTitle><CardBody>
             <div className="dc-plan"><span><strong>{latestPlan.packages.toLocaleString()}</strong> packages</span>
@@ -141,9 +145,23 @@ function App() {
               {latestPlan.within_budget && latestPlan.enough_space ? 'Fits the saved budget and available storage' : 'Exceeds the saved budget or available storage'}</Label>
             <p className="dc-muted">A new size preflight is performed for every sync. Metadata refresh may use additional cache space.</p>
           </CardBody></Card>}
-          <Alert variant="info" isInline title="Connected-side prototype">
-            <p>Import, publication, and fleet patching will be added after testing on a disconnected host. Transfer bundles currently carry checksums, without a cryptographic signature.</p>
+          <Alert variant="info" isInline title={disconnected ? 'Disconnected import prototype' : 'Connected sync prototype'}>
+            <p>Transfer bundles carry checksums, without a cryptographic signature. Imported repositories are available locally; HTTP publication and fleet patching are future capabilities.</p>
           </Alert>
+        </>}
+        {tab === 'incoming' && disconnected && <>
+          <Alert variant={state.capabilities.allow_unsigned_imports ? 'warning' : 'info'} isInline
+            title={state.capabilities.allow_unsigned_imports ? 'Unsigned prototype imports enabled by the administrator' : 'Unsigned prototype imports are disabled'}>
+            <p>Checksums verify integrity, not provenance. Every imported RPM is independently checked against the host's trusted signing keys.</p>
+          </Alert>
+          <Card><CardTitle>Transfer inbox</CardTitle><CardBody>
+            <p>Stage the archive and matching .sha256 file in <code>{state.storage.path}/incoming</code>. Import validates the entire bundle before a snapshot becomes available.</p>
+            {!state.incoming.length && <p>No transfer archives are staged yet.</p>}
+            {state.incoming.map(bundle => <div className="dc-repo" key={bundle.name}><div><strong>{bundle.name}</strong>
+              <p>{bytes(bundle.bytes)} · {bundle.has_checksum ? 'Checksum sidecar present' : 'Checksum sidecar missing'}</p></div>
+              <Button isDisabled={disabled || !bundle.has_checksum || !state.capabilities.allow_unsigned_imports}
+                onClick={() => { void start('import', bundle.name); }}>Import bundle</Button></div>)}
+          </CardBody></Card>
         </>}
         {tab === 'profile' && <Card><CardTitle>Choose content to mirror</CardTitle><CardBody>
           <p>Repositories already configured on this host are available here. Selections apply only to mirror jobs; the host's enabled repositories are preserved.</p>
@@ -162,14 +180,16 @@ function App() {
             <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('sync'); }}>Save &amp; sync snapshot</Button></div>
         </CardBody></Card>}
         {tab === 'snapshots' && <>
-          {!state.snapshots.length && <Card><CardTitle>No validated snapshots yet</CardTitle><CardBody>Complete a sync to create the first snapshot.</CardBody></Card>}
+          {!state.snapshots.length && <Card><CardTitle>No validated snapshots yet</CardTitle><CardBody>{disconnected ? 'Import a transfer bundle to create the first snapshot.' : 'Complete a sync to create the first snapshot.'}</CardBody></Card>}
           {state.snapshots.map(snapshot => <Card key={snapshot.id}><CardTitle><span>Snapshot {snapshot.id.slice(0, 8)}</span> <Label color="green">Validated</Label></CardTitle><CardBody>
             <p>{date(snapshot.created)} · {bytes(snapshot.package_bytes)} of RPM content</p>
             <ul className="dc-snapshot-repos">{Object.entries(snapshot.repositories).map(([rid, result]) => <li key={rid}>
               <strong>{rid}</strong><br />{result.packages.toLocaleString()} packages · metadata and package checksums verified · RPM signatures verified<br />
               <span className="dc-muted">Advisory metadata: {result.metadata_types.includes('updateinfo') ? 'present' : 'not supplied by this repository'}</span></li>)}</ul>
-            <div className="dc-actions"><Button isDisabled={disabled} onClick={() => { void start('export', snapshot.id); }}>Build transfer bundle</Button>
-              <Button variant="secondary" isDisabled={disabled} onClick={() => { void start('verify-export', snapshot.id); }}>Verify existing bundle</Button></div>
+            {disconnected && <div className="dc-local-repos"><strong>Local repository URLs</strong>
+              {Object.keys(snapshot.repositories).map(rid => <code key={rid}>{`file://${state.storage.path}/snapshots/${snapshot.id}/repositories/${rid}`}</code>)}</div>}
+            {!disconnected && <div className="dc-actions"><Button isDisabled={disabled} onClick={() => { void start('export', snapshot.id); }}>Build transfer bundle</Button>
+              <Button variant="secondary" isDisabled={disabled} onClick={() => { void start('verify-export', snapshot.id); }}>Verify existing bundle</Button></div>}
           </CardBody></Card>)}
         </>}
         {tab === 'jobs' && <>

@@ -26,12 +26,13 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 HELPER = "/usr/libexec/disconnected-content"
 GIB = 1024 ** 3
 ID = re.compile(r"^[a-f0-9]{32}$")
 REPO_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,180}$")
+BUNDLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.tar$")
 NS_REPO = "{http://linux.duke.edu/metadata/repo}"
 NS_COMMON = "{http://linux.duke.edu/metadata/common}"
 
@@ -96,6 +97,19 @@ def host_os():
             result[k] = v.strip('"')
     return {"name": result.get("PRETTY_NAME", "Linux"),
             "major": result.get("VERSION_ID", "0").split(".")[0], "arch": os.uname().machine}
+
+
+class LimitedMetadataReader:
+    def __init__(self, stream, limit=512 * 1024 * 1024):
+        self.stream, self.limit, self.read_bytes = stream, limit, 0
+
+    def read(self, size=-1):
+        size = min(size if size >= 0 else self.limit + 1, self.limit - self.read_bytes + 1)
+        data = self.stream.read(size)
+        self.read_bytes += len(data)
+        if self.read_bytes > self.limit:
+            raise ValueError("Decompressed repository metadata exceeds the size limit")
+        return data
 
 
 def repositories():
@@ -163,7 +177,7 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True):
     count, total = 0, 0
     package_paths = []
     with metadata_stream(primary) as stream:
-        for _, element in ET.iterparse(stream, events=("end",)):
+        for _, element in ET.iterparse(LimitedMetadataReader(stream), events=("end",)):
             if element.tag != f"{NS_COMMON}package":
                 continue
             location = element.find(f"{NS_COMMON}location")
@@ -184,39 +198,85 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True):
     if check_signatures:
         for offset in range(0, len(package_paths), 100):
             checked = subprocess.run(["/usr/bin/rpmkeys", "--checksig", *package_paths[offset:offset+100]],
-                                     capture_output=True, text=True, check=False)
+                                     capture_output=True, text=True, check=False,
+                                     env={**os.environ, "LC_ALL": "C"})
             lines = checked.stdout.splitlines()
             if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
-                    "signatures OK" not in line for line in lines):
+                    line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
                 raise ValueError("RPM signature validation failed or signing key is not trusted")
     return {"packages": count, "package_bytes": total, "metadata_types": sorted(metadata_types),
             "rpm_signatures_verified": check_signatures}
 
 
-def verify_archive(path):
-    """Stream the archive, without extracting it or trusting its file paths."""
+def bundle_manifest(archive, max_bytes, max_files):
+    first = archive.next()
+    if first is None or first.name != "manifest.json" or not first.isfile() or not 0 <= first.size <= 32 * 1024 * 1024:
+        raise ValueError("Archive must start with a bounded manifest")
+    with archive.extractfile(first) as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict) or manifest.get("format") != "disconnected-content/v1":
+        raise ValueError("Unsupported bundle format")
+    expected = manifest.get("files")
+    if not isinstance(expected, dict) or not 1 <= len(expected) <= max_files:
+        raise ValueError("Bundle file count exceeds the allowed limit or is empty")
+    total = 0
+    for name, entry in expected.items():
+        safe_path(Path("/bundle"), name)
+        if PurePosixPath(name).as_posix() != name or len(name) > 512 or any(ord(c) < 32 for c in name):
+            raise ValueError("Unsafe or non-canonical bundle path")
+        if not isinstance(entry, dict) or type(entry.get("size")) is not int or entry["size"] < 0:
+            raise ValueError("Invalid declared file size")
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", entry["sha256"]):
+            raise ValueError("Invalid declared SHA-256 checksum")
+        total += entry["size"]
+        if total > max_bytes:
+            raise ValueError("Bundle exceeds the import size limit")
+    if not isinstance(manifest.get("snapshot_id"), str) or not ID.fullmatch(manifest["snapshot_id"]):
+        raise ValueError("Invalid bundle snapshot identifier")
+    repos = manifest.get("repositories")
+    if not isinstance(repos, dict) or not 1 <= len(repos) <= 20 or any(not REPO_ID.fullmatch(r) for r in repos):
+        raise ValueError("Invalid bundle repository list")
+    for name in expected:
+        parts = PurePosixPath(name).parts
+        if len(parts) < 3 or len(parts) > 32 or parts[0] != "repositories" or parts[1] not in repos:
+            raise ValueError("Bundle content must belong to a declared repository")
+    if not isinstance(manifest.get("os"), dict) or not all(isinstance(manifest["os"].get(k), str) for k in ["major", "arch"]):
+        raise ValueError("Bundle OS version and architecture are required")
+    return manifest, total
+
+
+def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000, reserve_bytes=0):
+    """Verify a bounded stream; optionally write regular files to private staging.
+
+    Never use extractall: archive ownership, mode, links, and paths are untrusted.
+    """
     with tarfile.open(path, "r|") as archive:
-        first = archive.next()
-        if first is None or first.name != "manifest.json" or not first.isfile() or first.size > 32 * 1024 * 1024:
-            raise ValueError("Archive must start with a bounded manifest")
-        manifest = json.load(archive.extractfile(first))
-        if manifest.get("format") != "disconnected-content/v1":
-            raise ValueError("Unsupported bundle format")
+        manifest, _ = bundle_manifest(archive, max_bytes, max_files)
         expected = manifest["files"]
-        if not isinstance(expected, dict) or not expected:
-            raise ValueError("Bundle file manifest is empty")
         seen = set()
         for member in iter(archive.next, None):
             safe_path(Path("/bundle"), member.name)
-            if not member.isfile() or member.name not in expected or member.name in seen:
+            if (not member.isfile() or member.name not in expected or member.name in seen
+                    or member.sparse is not None or any(k.startswith("GNU.sparse") for k in member.pax_headers)):
                 raise ValueError("Unexpected, duplicate, or non-regular archive member")
             entry = expected[member.name]
             if member.size != entry["size"]:
                 raise ValueError("Archive member size mismatch")
             h = hashlib.sha256()
-            with archive.extractfile(member) as stream:
+            with contextlib.ExitStack() as stack:
+                stream = stack.enter_context(archive.extractfile(member))
+                output = None
+                if extract_to is not None:
+                    if shutil.disk_usage(extract_to).free < member.size + reserve_bytes:
+                        raise ValueError("Storage reserve reached during import")
+                    target = safe_path(extract_to, member.name)
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    output = stack.enter_context(target.open("xb"))
+                    os.chmod(target, 0o600)
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     h.update(block)
+                    if output is not None:
+                        output.write(block)
             if h.hexdigest() != entry["sha256"]:
                 raise ValueError("Archive member checksum mismatch")
             seen.add(member.name)
@@ -234,7 +294,7 @@ class Engine:
             raise ValueError("state_dir must be absolute")
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports"):
+        for sub in ("jobs", "snapshots", "exports", "incoming", ".imports"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
 
     @contextlib.contextmanager
@@ -298,13 +358,33 @@ class Engine:
                 "storage": {"path": str(self.root), "free": usage.free, "total": usage.total,
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
-                "capabilities": {"import": False, "publish": False, "signed_exports": False}}
+                "incoming": self.incoming() if self.config.get("role") == "disconnected" else [],
+                "capabilities": {"import": self.config.get("role") == "disconnected", "publish": False,
+                                 "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
+
+    def incoming(self):
+        return [{"name": p.name, "bytes": p.stat().st_size,
+                 "has_checksum": p.with_suffix(".tar.sha256").is_file()}
+                for p in sorted((self.root / "incoming").glob("*.tar"))
+                if BUNDLE_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
+
+    def bundle_path(self, name):
+        if not isinstance(name, str) or not BUNDLE_NAME.fullmatch(name):
+            raise ValueError("Select a transfer archive from the incoming directory")
+        path = safe_path(self.root / "incoming", name)
+        if not path.is_file():
+            raise ValueError("Transfer archive is missing")
+        return path
 
     def start(self, operation, snapshot_id=None):
-        if self.config.get("role") != "connected":
-            raise ValueError("This installation does not permit connected operations")
-        if operation not in {"preflight", "sync", "export", "verify-export"}:
+        if operation not in {"preflight", "sync", "export", "verify-export", "import"}:
             raise ValueError("Unknown operation")
+        if operation == "import":
+            if self.config.get("role") != "disconnected":
+                raise ValueError("Import requires the disconnected installation role")
+            self.bundle_path(snapshot_id)
+        elif self.config.get("role") != "connected":
+            raise ValueError("This installation does not permit connected operations")
         with self.lock():
             # Read files directly: reconciliation in jobs() acquires the same lock.
             if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
@@ -320,7 +400,9 @@ class Engine:
                     raise ValueError("Only validated snapshots can be exported")
             jid = uuid.uuid4().hex
             job = {"id": jid, "operation": operation, "status": "queued", "stage": "Waiting for worker",
-                   "created": now(), "profile": profile, "snapshot_id": snapshot_id}
+                   "created": now(), "profile": profile, "snapshot_id": snapshot_id if operation != "import" else None}
+            if operation == "import":
+                job["bundle_name"] = snapshot_id
             write_json(self.job_path(jid), job)
             started = subprocess.run(["/usr/bin/systemctl", "start", "--no-block", self.unit(jid)],
                                      capture_output=True, text=True, check=False)
@@ -329,6 +411,63 @@ class Engine:
                 write_json(self.job_path(jid), job)
                 raise ValueError("Cannot start worker service; inspect the service journal")
         return job
+
+    def import_bundle(self, job):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Import requires the disconnected installation role")
+        if self.config.get("allow_unsigned_imports") is not True:
+            raise ValueError("Unsigned imports are disabled; an administrator must explicitly enable prototype imports")
+        path = self.bundle_path(job["bundle_name"])
+        limit = int(self.config.get("max_import_gib", 200)) * GIB
+        if path.stat().st_size > limit + GIB:
+            raise ValueError("Transfer archive exceeds the import size limit")
+        sidecar = safe_path(self.root / "incoming", path.name + ".sha256")
+        if sidecar.stat().st_size > 1024:
+            raise ValueError("Checksum sidecar is too large")
+        match = re.fullmatch(r"([a-f0-9]{64}) [ *]" + re.escape(path.name) + r"\n?", sidecar.read_text())
+        self.update(job, stage="Verifying transferred archive against its SHA-256 sidecar")
+        checksum = digest(path)
+        if match is None or match.group(1) != checksum:
+            raise ValueError("Transfer checksum mismatch; archive was not imported")
+        with tarfile.open(path, "r|") as archive:
+            manifest, total = bundle_manifest(archive, limit, 200000)
+        target_os = host_os()
+        if any(manifest["os"][key] != target_os[key] for key in ["major", "arch"]):
+            raise ValueError("Bundle RHEL major version or architecture does not match this host")
+        if manifest.get("authentication") != "unsigned-prototype":
+            raise ValueError("Bundle authentication scheme is not supported")
+        sid = manifest["snapshot_id"]
+        destination = self.root / "snapshots" / sid
+        if destination.exists():
+            existing = read_json(destination / "snapshot.json")
+            if existing.get("source_archive_sha256") == checksum:
+                self.update(job, snapshot_id=sid, result={"snapshot_id": sid, "already_imported": True,
+                                                        "authenticated": False})
+                return
+            raise ValueError("A different snapshot already uses this identifier")
+        if shutil.disk_usage(self.root).free < total + self.floor + GIB:
+            raise ValueError("Not enough free space for import staging and the storage reserve")
+        staging = self.root / ".imports" / job["id"]
+        staging.mkdir(mode=0o700)
+        try:
+            self.update(job, stage="Checking archive members and extracting to private staging")
+            verified = verify_archive(path, extract_to=staging, max_bytes=limit, reserve_bytes=self.floor)
+            self.update(job, stage="Revalidating repository metadata and trusted RPM signatures")
+            checked = {}
+            for rid in manifest["repositories"]:
+                checked[rid] = validate_repository(staging / "repositories" / rid,
+                                                  require_updateinfo=("baseos" in rid or "appstream" in rid))
+            snapshot = {"id": sid, "created": now(), "status": "validated", "os": manifest["os"],
+                        "repositories": checked, "package_bytes": sum(r["package_bytes"] for r in checked.values()),
+                        "imported": True, "source_archive_sha256": checksum, "authenticated": False}
+            write_json(staging / "snapshot.json", snapshot)
+            # The snapshot becomes visible only after every validation succeeds.
+            os.rename(staging, destination)
+            self.update(job, snapshot_id=sid, result={"snapshot_id": sid, "repositories": checked,
+                                                    "source_archive_sha256": checksum, **verified})
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
 
     @staticmethod
     def save_profile_unlocked_validate(profile):
@@ -478,6 +617,8 @@ class Engine:
             elif job["operation"] == "verify-export":
                 path = self.root / "exports" / f"{job['snapshot_id']}.tar"
                 self.update(job, stage="Verifying exported archive", result=verify_archive(path))
+            elif job["operation"] == "import":
+                self.import_bundle(job)
             self.update(job, status="succeeded", stage="Completed", finished=now())
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, InterruptedError)):

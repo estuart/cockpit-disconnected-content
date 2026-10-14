@@ -1,8 +1,8 @@
 # Disconnected Content for Cockpit
 
-A connected-side prototype for building, validating, and exporting RPM repository
-snapshots through the RHEL web console. Install on a registered RHEL sync host;
-repositories are selected from that host's existing configuration.
+A prototype for building, validating, exporting, and importing RPM repository
+snapshots through the RHEL web console. Install the connected role on a registered
+RHEL sync host and the disconnected role on a separate RHEL system.
 
 ## Prototype capabilities
 
@@ -15,8 +15,10 @@ repositories are selected from that host's existing configuration.
 - Versioned snapshots, uncompressed tar transfer bundles, per-file manifests,
   archive read-back verification, and SHA-256 sidecars.
 - Job history, local command output, and explicit failed/interrupted states.
+- A disconnected transfer inbox with bounded archive validation, compatibility
+  checks, independent RPM signature checks, and atomic snapshot visibility.
 
-Import, publication, incremental transfers, signed bundle manifests, and host
+HTTP publication, incremental transfers, signed bundle manifests, and fleet
 patching are not implemented. This is an independently maintained prototype;
 the extension does not acquire a Red Hat product support commitment by running
 inside Cockpit. RHEL subscriptions and access rights remain the operator's responsibility.
@@ -70,7 +72,7 @@ allowance. It is not a storage quota and cannot predict concurrent use by other
 workloads. DNF metadata caches also consume space on their configured filesystem.
 Start with a small repository and a conservative snapshot budget.
 
-## First cycle
+## Connected cycle
 
 1. Select a repository in **Repositories** and save the profile.
 2. Run **Check size** and inspect the result.
@@ -87,6 +89,44 @@ Bundles are **unsigned** in this version. Their hashes detect content corruption
 they do not establish who produced the bundle. RPM signatures remain independently
 verified against the host's trusted RPM keyring. Do not treat a transferred key
 and an accompanying bundle as an independent trust anchor.
+
+## Disconnected import
+
+Install the application and its runtime dependencies before isolating the host,
+or provide them through an approved offline bootstrap repository. The importer
+does not download packages or require access to the sync host.
+
+Configure the root-owned `/etc/disconnected-content/config.json` for this role:
+
+```json
+{
+  "role": "disconnected",
+  "state_dir": "/var/lib/disconnected-content",
+  "reserve_gib": 5,
+  "max_import_gib": 200,
+  "allow_unsigned_imports": false
+}
+```
+
+This version produces unsigned bundles. Import is rejected by default. For an
+explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
+administrator. This does not authenticate the manifest; RPM signatures are still
+required and validated against the host's independently provisioned RPM keyring.
+
+1. Initialize the directories with `sudo /usr/libexec/disconnected-content status`.
+2. Stage the `.tar` and matching `.tar.sha256` in the state directory's `incoming/`
+   folder, owned by root. Copy them through the approved transfer process.
+3. Open **Incoming bundles** and choose **Import bundle**.
+4. Follow the job under **Jobs & evidence**. A failed import leaves no usable
+   snapshot and removes its private extraction staging directory.
+5. Open **Snapshots** for validation results and local `file://` repository URLs.
+
+The importer checks the outer checksum, manifest schema, size/file-count limits,
+safe paths, file checksums, RHEL major version, architecture, repository metadata,
+and trusted RPM signatures. Archive ownership, modes, links, special files, sparse
+files, duplicate members, and unexpected paths are not accepted or applied.
+An identical bundle can be imported again without duplicating or replacing its
+snapshot. HTTP serving and client promotion are separate future features.
 
 ## Development and publication hygiene
 

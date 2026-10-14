@@ -2,7 +2,8 @@
 
 - Initial deployment target: RHEL 10 x86_64. Other RHEL/Cockpit combinations require
   their own validation before being advertised as supported.
-- Connected role only. No disconnected machine is provisioned by this project.
+- Connected sync/export and disconnected import roles are implemented. The
+  application does not provision VMs or change network isolation policies.
 - The profile mirrors existing repositories using the host's existing release and
   entitlement configuration. Cross-major mirroring, EUS selection, architectures,
   and release-policy management are not implemented.
@@ -19,10 +20,15 @@
   key enrollment is added by this application.
 - Bundle checksums establish integrity, not provenance. Signed manifests, trust
   provisioning, and FIPS-mode validation remain future release requirements.
-- Importer hardening and hostile-input resource limits require additional work
-  before accepting bundles from another machine. Verification here is for bundles
-  produced by the local prototype; the UI does not accept arbitrary archive paths.
-- Failed jobs retain their partial snapshot/archive files. Root can inspect and
+- Imports are disabled by default because bundles are unsigned. An explicit
+  administrator opt-in is required for this prototype. Archive bounds and safe
+  extraction reduce input risk; they do not authenticate metadata or prevent a
+  trusted RPM's old version from being replayed. Signing and release policy remain
+  necessary before a production release.
+- The importer requires matching RHEL major version/architecture and an existing
+  trusted RPM keyring. It never downloads missing keys or dependencies.
+- Failed sync/export jobs retain partial content. Failed imports remove private
+  staging and do not expose a snapshot. Root can inspect and
   remove them when no related job is active. Never remove an active job's files.
 - The helper currently requires full administrative access. Limited operator
   authorization and a D-Bus interface are future work.

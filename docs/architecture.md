@@ -23,11 +23,17 @@ Each sync creates a new directory. No mutation, pruning, or deletion of an older
 validated snapshot is performed. Partial content is retained for diagnosis but is
 not exposed as a valid snapshot. Initial retention and cleanup are manual.
 
-A future disconnected importer will accept the versioned transfer format, validate
-it against a provisioned signing policy, reconstruct a snapshot in staging, and
-publish immutable versioned URLs only after successful validation. It must reject
-unsafe paths, unexpected members, incompatible formats, missing data, and untrusted
-signatures. Promotion of clients is separate from publication.
+The disconnected importer accepts bundles only from the fixed local inbox. It
+verifies the outer checksum, bounds the manifest, checks major version and
+architecture, streams regular files into private staging, and independently
+validates repository contents and RPM signatures. A same-filesystem rename makes
+the snapshot visible only after all checks pass. Failed imports remove staging.
+No tar extraction API is used to apply archive paths, ownership, permissions, or
+links. Archive members are written explicitly with restrictive local permissions.
+
+Unsigned imports require explicit administrator configuration. A provisioned
+manifest signing policy remains future work. Immutable HTTP publication and
+promotion of clients are separate future capabilities.
 
 ## Transfer format v1 (experimental)
 

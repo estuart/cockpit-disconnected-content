@@ -32,4 +32,6 @@ body { margin: 0; background: var(--pf-t--global--background--color--secondary--
 .dc-export { display: grid; gap: 8px; margin: 18px 0; padding: 18px; background: var(--pf-t--global--background--color--secondary--default); }
 .dc-export code { overflow-wrap: anywhere; font-size: 13px; }
 .dc-loading { padding: 40px 32px; display: grid; gap: 20px; justify-items: start; }
+.dc-local-repos { display: grid; gap: 10px; }
+.dc-local-repos code { overflow-wrap: anywhere; white-space: normal; min-width: 0; }
 @media(max-width: 900px) { .dc-stats { grid-template-columns: 1fr; } .dc-header { flex-direction: column; } .dc-profile-controls { grid-template-columns: 1fr; } }

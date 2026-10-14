@@ -82,6 +82,11 @@ class RepositoryValidation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signature validation"):
                 engine.validate_repository(self.root)
 
+    def test_filename_cannot_spoof_signature_success(self):
+        with patch.object(engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "/packages/signatures OK.rpm: digests OK\n", "")):
+            with self.assertRaisesRegex(ValueError, "signature validation"):
+                engine.validate_repository(self.root)
+
     def test_unsafe_paths_and_symlinks_are_rejected(self):
         for name in ["../escape", "/absolute", "https://example.invalid/file", "a\\b"]:
             with self.subTest(name=name), self.assertRaises(ValueError):
