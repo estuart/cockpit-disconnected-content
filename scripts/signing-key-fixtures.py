@@ -17,4 +17,9 @@ record['client_config'] = engine.client_repo_config(record['base_url'], {'id': r
 state['automation'] = engine.client_automation(record)
 state['signing_key_files'] = ['vendor.asc']
 state['trusted_signing_keys'] = []
-print(json.dumps({'state': state, 'review': review}))
+state['bundle_key_candidates'] = []
+state['incoming'] = [{'name': 'example.tar', 'bytes': 10240, 'modified': '2026-01-01T00:00:00Z', 'has_checksum': True, 'state': 'awaiting_import'}]
+candidate = {'candidate_id': 'e' * 32, 'repository_id': 'vendor-example', 'sha256': review['sha256'],
+    'bundle_name': 'example.tar', 'bundle_sha256': 'f' * 64, 'snapshot_id': record['snapshot_id'],
+    'scanned_at': '2026-01-01T00:00:00Z', 'trusted': False}
+print(json.dumps({'state': state, 'review': review, 'candidate': candidate}))

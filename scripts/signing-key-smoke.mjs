@@ -18,7 +18,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1400, height: 1100 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(({ state, review }) => {
+  await page.addInitScript(({ state, review, candidate }) => {
     window.testCalls = [];
     window.cockpit = { spawn(args) {
       let finish;
@@ -28,7 +28,9 @@ try {
       if (args[1] === 'client-automation') finish(JSON.stringify(state.automation));
       result.input = input => {
         window.testCalls.push(['input', args[1], JSON.parse(input)]);
-        if (args[1] === 'trust-signing-key') {
+        if (args[1] === 'scan-bundle-keys') {
+          state.bundle_key_candidates = [candidate]; finish(JSON.stringify({ keys: 1 }));
+        } else if (args[1] === 'trust-signing-key') {
           state.trusted_signing_keys = [{ repository_id: review.repository_id, signing_keys: [Object.assign({}, review, { approved_at: review.reviewed_at })] }];
           finish('{}');
         } else finish(JSON.stringify(review));
@@ -37,7 +39,10 @@ try {
     } };
   }, fixture);
   await page.goto(`http://127.0.0.1:${server.address().port}`);
-  await page.getByRole('tab', { name: 'Signing keys', exact: true }).click();
+  await page.getByRole('tab', { name: 'Incoming bundles', exact: true }).click();
+  await page.getByRole('button', { name: 'Review bundled keys', exact: true }).click();
+  await expect(page.getByText('Untrusted candidate', { exact: true })).toBeVisible();
+  expect((await page.evaluate(() => window.testCalls)).some(call => call[0] === 'trust-signing-key')).toBe(false);
   await page.getByRole('textbox', { name: 'Repository ID', exact: true }).fill('vendor-example');
   await page.getByLabel('Public key in saved transfer folder').selectOption('vendor.asc');
   await page.getByRole('button', { name: 'Review public key', exact: true }).click();
@@ -46,11 +51,13 @@ try {
   await page.getByRole('textbox', { name: 'Repository ID', exact: true }).fill('another-repo');
   await expect(page.getByRole('button', { name: 'Approve signing key', exact: true })).toHaveCount(0);
   await page.getByRole('textbox', { name: 'Repository ID', exact: true }).fill('vendor-example');
-  await page.getByRole('button', { name: 'Review public key', exact: true }).click();
+  await page.getByRole('button', { name: 'Review bundled public key', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Public signing key review' })).toContainText(fixture.review.fingerprint);
   await page.getByRole('checkbox', { name: /I verified the full fingerprint/ }).check();
   await page.getByRole('button', { name: 'Approve signing key', exact: true }).click();
   await expect(page.locator('.pf-v6-c-alert__title').filter({ hasText: 'Signing key approved. Return to Incoming bundles and retry the import.' })).toBeVisible();
   const calls = await page.evaluate(() => window.testCalls);
+  expect(calls.some(call => call[0] === 'input' && call[1] === 'review-signing-key' && call[2].bundle_key === fixture.candidate.candidate_id)).toBe(true);
   const approval = calls.find(call => call[0] === 'input' && call[1] === 'trust-signing-key')[2];
   expect(approval).toEqual({ review_id: fixture.review.review_id, fingerprint: fixture.review.fingerprint, confirmed: true });
   expect(calls.some(call => call[0] === 'start')).toBe(false);

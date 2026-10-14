@@ -161,7 +161,7 @@ class Dashboard(unittest.TestCase):
         root = self.app.root / 'snapshots' / self.sid
         fixture(root / 'repositories' / 'example-baseos')
         engine.write_json(root / 'snapshot.json', self.snapshot)
-        with patch.object(engine, 'validate_repository', return_value={}):
+        with patch.object(engine, 'validate_repository', return_value={}), patch.object(engine, 'configured_signing_key_sources', return_value={}):
             self.app.export({'id': 'b' * 32, 'snapshot_id': self.sid, 'status': 'succeeded',
                              'operation': 'export', 'created': self.snapshot['created']})
         return root

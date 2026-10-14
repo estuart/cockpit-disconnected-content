@@ -181,7 +181,7 @@ class JobsAndExports(unittest.TestCase):
         # Runtime-only data must never be included in transfer media.
         (self.app.root / "local-credential").write_text("local-only")
         job = {"id": jid, "snapshot_id": sid}
-        with patch.object(engine, "validate_repository", wraps=lambda *a, **kw: {}):
+        with patch.object(engine, "validate_repository", wraps=lambda *a, **kw: {}), patch.object(engine, "configured_signing_key_sources", return_value={}):
             self.app.export(job)
         path = Path(job["result"]["path"])
         result = engine.verify_archive(path)

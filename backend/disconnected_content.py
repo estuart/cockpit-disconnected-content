@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import bz2
 import configparser
 import contextlib
@@ -26,9 +27,10 @@ import tempfile
 import time
 import uuid
 from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener, url2pathname
 import xml.etree.ElementTree as ET
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -42,6 +44,96 @@ NS_REPO = "{http://linux.duke.edu/metadata/repo}"
 NS_COMMON = "{http://linux.duke.edu/metadata/common}"
 FINGERPRINT = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
 KEY_LIMIT = 65536
+
+
+def public_key_blocks(text):
+    """Accept public certificate packets only; never export secret/encrypted packets.
+
+    Packet framing follows RFC 9580 sections 4.2 and 10.1. Fingerprints and
+    cryptographic validity are still determined by GnuPG during explicit review.
+    """
+    if not isinstance(text, str) or len(text.encode()) > 1024 * 1024 or 'PRIVATE KEY' in text:
+        raise ValueError("Configured signing-key file is too large or contains private key material")
+    blocks = re.findall(r"-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----", text)
+    if (not 1 <= len(blocks) <= 8 or text.count('-----BEGIN PGP PUBLIC KEY BLOCK-----') != len(blocks)
+            or text.count('-----END PGP PUBLIC KEY BLOCK-----') != len(blocks)):
+        raise ValueError("Expected one to eight armored public signing keys")
+    result = []
+    for block in blocks:
+        armor = block + "\n"
+        if len(armor.encode()) > KEY_LIMIT:
+            raise ValueError("Public signing key exceeds 64 KiB")
+        lines = block.splitlines()[1:-1]
+        while lines and (not lines[0].strip() or ':' in lines[0]):
+            lines.pop(0)
+        payload = ''.join(line.strip() for line in lines if line.strip() and not line.startswith('='))
+        try:
+            raw = base64.b64decode(payload, validate=True)
+            cursor, primary = 0, 0
+            while cursor < len(raw):
+                header = raw[cursor]; cursor += 1
+                if not header & 128:
+                    raise ValueError("Invalid public-key packet")
+                if header & 64:
+                    tag = header & 63
+                    size = raw[cursor]; cursor += 1
+                    if 192 <= size <= 223:
+                        size = (size - 192) * 256 + raw[cursor] + 192; cursor += 1
+                    elif size == 255:
+                        size = int.from_bytes(raw[cursor:cursor+4], 'big'); cursor += 4
+                    elif size >= 224:
+                        raise ValueError("Partial public-key packet lengths are not supported")
+                else:
+                    tag, kind = (header >> 2) & 15, header & 3
+                    if kind == 3:
+                        raise ValueError("Unbounded public-key packet")
+                    width = 1 << kind
+                    if cursor + width > len(raw):
+                        raise ValueError("Truncated public-key packet")
+                    size = int.from_bytes(raw[cursor:cursor+width], 'big'); cursor += width
+                if tag not in {2, 6, 13, 14, 17, 21} or not primary and tag != 6:
+                    raise ValueError("Only public certificate packets may enter a transfer bundle")
+                primary += tag == 6
+                if primary > 1 or size <= 0 or cursor + size > len(raw):
+                    raise ValueError("Invalid or multiple public signing keys in one armor block")
+                cursor += size
+            if primary != 1:
+                raise ValueError("Public signing key packet is missing")
+        except (IndexError, ValueError) as error:
+            raise ValueError("Invalid public certificate; private or unsupported packets cannot be exported") from error
+        result.append(armor)
+    return result
+
+
+def configured_signing_key_sources(repo_ids):
+    """Use DNF's expanded configuration, without exporting URLs or credentials."""
+    import dnf
+    with dnf.Base() as base:
+        base.read_all_repos()
+        return {rid: list(base.repos[rid].gpgkey) for rid in repo_ids if rid in base.repos}
+
+
+def read_public_key_source(value):
+    class KeyRedirect(HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, message, headers, target):
+            parsed = urlsplit(target)
+            if parsed.scheme != 'https' or parsed.username is not None or parsed.password is not None:
+                raise ValueError("Public-key redirects must use HTTPS without credentials")
+            return super().redirect_request(request, fp, code, message, headers, target)
+    url = urlsplit(value)
+    if url.username is not None or url.password is not None or url.fragment:
+        raise ValueError("Public signing-key sources must not contain credentials or fragments")
+    if url.scheme == 'file' and not url.netloc and not url.query:
+        with open(url2pathname(url.path), 'rb') as stream:
+            raw = stream.read(1024 * 1024 + 1)
+    elif url.scheme == 'https' and url.hostname:
+        with build_opener(HTTPSHandler(), KeyRedirect()).open(Request(value), timeout=30) as stream:
+            raw = stream.read(1024 * 1024 + 1)
+    else:
+        raise ValueError("Configure a file:// or HTTPS public signing-key source")
+    if len(raw) > 1024 * 1024:
+        raise ValueError("Configured signing-key source exceeds 1 MiB")
+    return public_key_blocks(raw.decode('ascii'))
 
 
 class SignatureError(ValueError):
@@ -577,6 +669,22 @@ def bundle_manifest(archive, max_bytes, max_files):
     repos = manifest.get("repositories")
     if not isinstance(repos, dict) or not 1 <= len(repos) <= 20 or any(not REPO_ID.fullmatch(r) for r in repos):
         raise ValueError("Invalid bundle repository list")
+    keys = manifest.get("signing_keys", {})
+    if not isinstance(keys, dict) or any(rid not in repos for rid in keys):
+        raise ValueError("Invalid bundled signing-key repositories")
+    key_paths = set()
+    for rid, entries in keys.items():
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
+            raise ValueError("A bundle repository may supply one to eight public keys")
+        for entry in entries:
+            if (not isinstance(entry, dict) or set(entry) != {"path", "sha256"}
+                    or not isinstance(entry["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", entry["sha256"])
+                    or entry["path"] != f"repositories/{rid}/signing-keys/{entry['sha256']}.asc"
+                    or entry["path"] in key_paths or entry["path"] not in expected
+                    or expected[entry["path"]]["sha256"] != entry["sha256"]
+                    or not 0 < expected[entry["path"]]["size"] <= KEY_LIMIT):
+                raise ValueError("Invalid bundled public signing-key entry")
+            key_paths.add(entry["path"])
     for name in expected:
         parts = PurePosixPath(name).parts
         if len(parts) < 3 or len(parts) > 32 or parts[0] != "repositories" or parts[1] not in repos:
@@ -586,7 +694,7 @@ def bundle_manifest(archive, max_bytes, max_files):
     return manifest, total
 
 
-def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000, reserve_bytes=0):
+def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000, reserve_bytes=0, key_contents=None):
     """Verify a bounded stream; optionally write regular files to private staging.
 
     Never use extractall: archive ownership, mode, links, and paths are untrusted.
@@ -594,6 +702,7 @@ def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000
     with tarfile.open(path, "r|") as archive:
         manifest, _ = bundle_manifest(archive, max_bytes, max_files)
         expected = manifest["files"]
+        key_paths = {key["path"] for entries in manifest.get("signing_keys", {}).values() for key in entries}
         seen = set()
         for member in iter(archive.next, None):
             safe_path(Path("/bundle"), member.name)
@@ -604,6 +713,7 @@ def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000
             if member.size != entry["size"]:
                 raise ValueError("Archive member size mismatch")
             h = hashlib.sha256()
+            key_bytes = bytearray() if key_contents is not None and member.name in key_paths else None
             with contextlib.ExitStack() as stack:
                 stream = stack.enter_context(archive.extractfile(member))
                 output = None
@@ -616,15 +726,20 @@ def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000
                     os.chmod(target, 0o600)
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     h.update(block)
+                    if key_bytes is not None:
+                        key_bytes.extend(block)
                     if output is not None:
                         output.write(block)
             if h.hexdigest() != entry["sha256"]:
                 raise ValueError("Archive member checksum mismatch")
+            if key_bytes is not None:
+                key_contents[member.name] = bytes(key_bytes).decode('ascii')
             seen.add(member.name)
         if seen != set(expected):
             raise ValueError("Archive is missing files")
     return {"files_verified": len(seen), "snapshot_id": manifest["snapshot_id"], "verified_at": now(),
-            "authenticated": False, "note": "Unsigned prototype bundle; hashes verify integrity only."}
+            "authenticated": False, "bundled_signing_keys": sum(len(entries) for entries in manifest.get("signing_keys", {}).values()),
+            "note": "Unsigned prototype bundle; hashes verify integrity only. Bundled public keys require explicit review and approval."}
 
 
 class Engine:
@@ -636,8 +751,45 @@ class Engine:
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports", "key-reviews", "trusted-keys"):
+        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports", "key-reviews", "trusted-keys", "bundle-key-candidates"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
+
+    def scan_bundle_keys(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Bundle key review requires the disconnected role")
+        if not isinstance(data, dict) or set(data) != {"bundle_name"}:
+            raise ValueError("Select one incoming bundle to inspect")
+        with self.lock():
+            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+                raise ValueError("Wait for the active job before inspecting bundle keys")
+            path = self.bundle_path(data["bundle_name"])
+            fingerprint = self.fingerprint(path)
+            limit = int(self.config.get("max_import_gib", 200)) * GIB
+            if path.stat().st_size > limit + GIB:
+                raise ValueError("Transfer archive exceeds the import size limit")
+            checksum = digest(path)
+            if checksum != self.expected_archive_checksum(path):
+                raise ValueError("Transfer checksum mismatch; bundled keys were not staged")
+            contents = {}
+            verify_archive(path, max_bytes=limit, key_contents=contents)
+            with tarfile.open(path, 'r|') as archive:
+                manifest, _ = bundle_manifest(archive, limit, 200000)
+            if self.fingerprint(path) != fingerprint or digest(path) != checksum:
+                raise ValueError("Source archive changed while inspecting bundled signing keys")
+            candidates = []
+            for rid, entries in manifest.get('signing_keys', {}).items():
+                for entry in entries:
+                    armor = contents[entry['path']]
+                    if public_key_blocks(armor) != [armor]:
+                        raise ValueError("Bundle key must contain exactly one public certificate")
+                    cid = hashlib.sha256((checksum + rid + entry['sha256']).encode()).hexdigest()[:32]
+                    candidates.append({"candidate_id": cid, "repository_id": rid, "public_key": armor,
+                                       "sha256": entry['sha256'], "bundle_name": path.name, "bundle_sha256": checksum,
+                                       "snapshot_id": manifest['snapshot_id'], "scanned_at": now(), "trusted": False})
+            # Candidates are written only after the entire archive and every key pass integrity checks.
+            for candidate in candidates:
+                write_json(self.root / 'bundle-key-candidates' / (candidate['candidate_id'] + '.json'), candidate)
+            return {"bundle_name": path.name, "keys": len(candidates), "trusted": False}
 
     def key_files(self):
         try:
@@ -656,6 +808,14 @@ class Engine:
     def review_signing_key(self, data):
         if self.config.get("role") != "disconnected":
             raise ValueError("Signing key approval requires the disconnected role")
+        if isinstance(data, dict) and set(data) == {"bundle_key"}:
+            if not isinstance(data['bundle_key'], str) or not ID.fullmatch(data['bundle_key']):
+                raise ValueError("Select a bundled key candidate")
+            candidate = read_json(safe_path(self.root / 'bundle-key-candidates', data['bundle_key'] + '.json'))
+            data = {'repository_id': candidate['repository_id'], 'public_key': candidate['public_key']}
+            source = 'Bundle ' + candidate['bundle_name'] + ' SHA256 ' + candidate['bundle_sha256']
+        else:
+            source = 'Browser public-key selection'
         if (not isinstance(data, dict) or set(data) not in ({"repository_id", "public_key"}, {"repository_id", "key_file"})
                 or not isinstance(data.get("repository_id"), str) or not REPO_ID.fullmatch(data["repository_id"])):
             raise ValueError("Specify a repository ID and one public key")
@@ -667,7 +827,7 @@ class Engine:
                 armor = stream.read(KEY_LIMIT + 1).decode("utf-8")
             source = data["key_file"]
         else:
-            armor, source = data["public_key"], "Browser public-key selection"
+            armor = data["public_key"]
         key = inspect_public_key(armor)
         review = {**key, "review_id": uuid.uuid4().hex, "repository_id": data["repository_id"],
                   "reviewed_at": now(), "source": source}
@@ -1226,6 +1386,9 @@ class Engine:
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
                 "incoming": incoming, "import_source": source,
                 "signing_key_files": self.key_files() if self.config.get("role") == "disconnected" else [],
+                "bundle_key_candidates": [{k: v for k, v in read_json(p).items() if k != 'public_key'}
+                                          for p in sorted((self.root / 'bundle-key-candidates').glob('*.json'),
+                                                          key=lambda p: p.stat().st_mtime, reverse=True)[:200]],
                 "trusted_signing_keys": [read_json(p) for p in sorted((self.root / "trusted-keys").glob("*.json"))],
                 "publication": publication, "disconnected": disconnected,
                 "connected": connected,
@@ -1483,6 +1646,25 @@ class Engine:
         for rid in snapshot["repositories"]:
             validate_repository(snapshot_dir / "repositories" / rid,
                                 require_updateinfo=("baseos" in rid or "appstream" in rid))
+        self.update(job, stage="Collecting configured public signing keys for disconnected review")
+        key_payloads, bundled_keys = {}, {}
+        for rid, sources in configured_signing_key_sources(snapshot['repositories']).items():
+            if len(sources) > 8:
+                raise ValueError("Repository has more than eight configured public-key sources")
+            for source in sources:
+                try:
+                    blocks = read_public_key_source(source)
+                except Exception as error:
+                    raise ValueError(f"Cannot collect public signing keys for {rid}; check its configured file or HTTPS key source") from error
+                for armor in blocks:
+                    raw_key = armor.encode('ascii')
+                    checksum = hashlib.sha256(raw_key).hexdigest()
+                    name = f"repositories/{rid}/signing-keys/{checksum}.asc"
+                    if name not in key_payloads:
+                        key_payloads[name] = raw_key
+                        bundled_keys.setdefault(rid, []).append({'path': name, 'sha256': checksum})
+                    if len(bundled_keys[rid]) > 8:
+                        raise ValueError("Repository has more than eight public signing keys")
         files = {}
         self.update(job, stage="Hashing content for the transfer manifest")
         for path in sorted((snapshot_dir / "repositories").rglob("*")):
@@ -1494,11 +1676,17 @@ class Engine:
             elif not path.is_dir():
                 raise ValueError("Snapshot contains a special file")
         required = sum(f["size"] for f in files.values()) * 1.02 + self.floor
+        for name, raw_key in key_payloads.items():
+            if name in files:
+                raise ValueError("Snapshot content conflicts with the bundled public-key directory")
+            files[name] = {'size': len(raw_key), 'sha256': hashlib.sha256(raw_key).hexdigest()}
+        required += sum(len(raw_key) for raw_key in key_payloads.values())
         if shutil.disk_usage(self.root).free < required:
             raise ValueError("Not enough free space for the complete export and storage reserve")
         manifest = {"format": "disconnected-content/v1", "snapshot_id": sid, "created": now(),
                     "os": snapshot["os"], "repositories": snapshot["repositories"], "files": files,
                     "authentication": "unsigned-prototype"}
+        manifest['signing_keys'] = bundled_keys
         import io
         raw = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
         dest = self.root / "exports" / f"{sid}.tar"
@@ -1510,6 +1698,11 @@ class Engine:
             header.mode = 0o644
             archive.addfile(header, io.BytesIO(raw))
             for name in files:
+                if name in key_payloads:
+                    info = tarfile.TarInfo(name)
+                    info.size, info.mode = len(key_payloads[name]), 0o644
+                    archive.addfile(info, io.BytesIO(key_payloads[name]))
+                    continue
                 path = safe_path(snapshot_dir, name)
                 info = archive.gettarinfo(str(path), arcname=name)
                 info.uid = info.gid = 0
@@ -1533,6 +1726,7 @@ class Engine:
             record = {"snapshot_id": sid, "exported_at": exported_at or previous.get("exported_at"),
                       "verified_at": verified["verified_at"], "job_id": previous.get("job_id", job_id) if not exported_at else job_id,
                       "verification_job_id": job_id, "sha256": checksum, "bytes": path.stat().st_size,
+                      "bundled_signing_keys": verified.get('bundled_signing_keys', 0),
                       "files_verified": verified["files_verified"], "fingerprint": self.fingerprint(path)}
             write_json(record_path, record)
 
@@ -1602,7 +1796,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "client-automation", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "client-automation", "scan-bundle-keys", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -1616,13 +1810,15 @@ def main():
         result = engine.status()
     elif args.command == "client-automation":
         result = engine.client_automation(args.argument)
-    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "review-signing-key", "trust-signing-key"}:
+    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "scan-bundle-keys", "review-signing-key", "trust-signing-key"}:
         limit = 128 * 1024 if args.command == "review-signing-key" else 16384
         raw = sys.stdin.read(limit + 1)
         if len(raw) > limit:
             raise ValueError("Request is too large")
         data = json.loads(raw)
-        if args.command == "review-signing-key":
+        if args.command == "scan-bundle-keys":
+            result = engine.scan_bundle_keys(data)
+        elif args.command == "review-signing-key":
             result = engine.review_signing_key(data)
         elif args.command == "trust-signing-key":
             result = engine.trust_signing_key(data)

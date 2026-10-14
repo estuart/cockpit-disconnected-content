@@ -28,7 +28,7 @@ class DisconnectedImport(unittest.TestCase):
                         "rpm_signatures_verified": True}
         engine.write_json(snapshot / "snapshot.json", {"id": self.sid, "os": {"major": "10", "arch": "x86_64"},
                           "repositories": {self.rid: self.summary}, "status": "validated"})
-        with patch.object(engine, "validate_repository", return_value=self.summary):
+        with patch.object(engine, "validate_repository", return_value=self.summary), patch.object(engine, "configured_signing_key_sources", return_value={}):
             self.source.export({"id": "2" * 32, "snapshot_id": self.sid})
         self.path = self.target.root / "incoming" / f"{self.sid}.tar"
         self.path.write_bytes((self.source.root / "exports" / self.path.name).read_bytes())

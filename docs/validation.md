@@ -334,3 +334,36 @@ key was staged in the transfer inbox for manual GUI review; live key approval
 and advancement of the current publication were left to the operator. The live
 Cockpit browser URL was blocked by browser tool policy, so the new GUI was checked
 with local browser fixtures rather than a live authenticated browser session.
+
+## Public signing keys inside transfer bundles
+
+Version 0.10.0 collects public certificates from expanded DNF gpgkey sources,
+includes repository/key paths and SHA-256 in the transfer manifest, and provides
+an explicit bundled-key inspection and approval path on disconnected hosts.
+
+- Passed 138 backend tests on the development system and RHEL, TypeScript checks,
+  production builds, existing browser dashboard cases, and bundled-key inspection,
+  no-automatic-trust, explicit approval, exact downloads, and responsive UI checks.
+- Read the actual third-party repository's configured public key and the standard
+  RHEL file containing three public certificates. Export includes certificates
+  without source URLs, repository configuration, credentials, or private packets.
+- Created a fresh repository snapshot and exported a real signed third-party RPM
+  with one included public key using the normal connected service-backed jobs.
+  Transferred the archive and checksum sidecar, comparing byte counts and SHA-256
+  across the source, intermediate copy, and disconnected destination.
+- Exercised the real transferred bundle in temporary disconnected state without
+  preapproved repository keys. Archive inspection and key review granted no trust;
+  import failed for a missing key. Explicit fingerprint approval allowed import.
+  Publication-copy verification passed, and the published public key and generated
+  client configuration/playbooks retained the same approved key material.
+- Deployed main and publisher RPMs with installed-code hash verification. Existing
+  scoped approvals, host RPM trust, imports, current publication, configuration,
+  SELinux enforcement, and network isolation were preserved. A fresh bundle and
+  inspected key candidate were left available for manual testing without importing
+  or publishing that new bundle in the live application.
+
+Old bundles without key entries remain supported. Existing exports require a
+rebuild to include keys. The bundle manifest remains unsigned; public-key delivery
+is separate from the operator's independent fingerprint verification and approval.
+The live Cockpit browser URL remained unavailable to the browser tool; GUI checks
+used local browser fixtures, while deployment checks used SSH.

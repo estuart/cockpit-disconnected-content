@@ -27,6 +27,11 @@
   space but are not quota-enforced. Other workloads can consume disk concurrently.
 - Querying sizes can refresh DNF caches. It uses the host's DNF cache location.
 - Empty advisory results do not prove missing metadata or complete CVE coverage.
+- Bundled public keys come from configured file or HTTPS gpgkey sources. Sources
+  requiring credentials, custom client certificates, or HTTP must first be
+  provisioned as approved local public-key files. A repository with no configured
+  gpgkey source cannot automatically supply keys. Unsupported certificate formats
+  may be transferable but still require a compatible GnuPG/RPM stack for approval.
 - Repository public keys can be explicitly reviewed and approved in the GUI.
   Otherwise validation uses existing host RPM trust. Keys are never automatically
   trusted from bundles. Client enrollment through the downloaded configuration

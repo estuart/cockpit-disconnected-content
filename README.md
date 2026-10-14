@@ -122,7 +122,26 @@ and an accompanying bundle as an independent trust anchor.
 
 ## Repository signing keys
 
-For third-party or internal content, use **Signing keys** on the disconnected host:
+Exports now include public keys from each mirrored repository's configured
+`gpgkey` sources (`file://` or HTTPS). Files with multiple public certificates
+are split into individual bounded certificates. Only public certificate packets
+are accepted; private keys, credentials, repository configuration, and source URLs
+are excluded from the collected key payload. Export fails clearly if a configured
+key source cannot be collected. Repositories with no configured key source include
+no key; existing host trust or separately supplied public keys remain available.
+
+On the disconnected side, choose **Incoming bundles → Review bundled keys**.
+The app verifies the archive sidecar and every declared file checksum, then stages
+the included keys as **Untrusted candidates**. Select **Review bundled public key**
+to see the full fingerprint and confirm approval. Inspecting the archive and
+viewing a key never enroll it. Previously approved keys remain approved; bundled
+copies do not overwrite existing trust. The manifest includes repository-to-key
+paths and SHA-256 values, with no trust or approval assertion. Older bundles
+without key entries remain supported. Rebuild an export to include the new keys;
+existing transfer files do not gain keys retroactively.
+
+For third-party or internal content with a separately supplied public key, use
+**Signing keys** on the disconnected host:
 
 1. Place one ASCII-armored public key (`.asc`, `.key`, or `.pub`, at most 64 KiB)
    in the saved transfer folder and scan again, or select a file on your computer

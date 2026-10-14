@@ -183,3 +183,16 @@ Client configuration references local fingerprint-named keys. Downloaded Ansible
 configuration embeds exact public keys and uses full fingerprint verification before enrollment;
 security updates check the same pinned key files and keep DNF GPG verification.
 Keys from unsigned transfer bundles never become trusted automatically.
+
+## Bundled public-key candidates
+
+Exports read expanded DNF gpgkey sources and collect bounded public certificate
+blocks. A packet-type filter rejects secret, compressed, or encrypted packets;
+GnuPG remains responsible for fingerprint and validity checks at explicit review.
+The optional v1 signing_keys manifest maps repository IDs to public-key file paths
+and SHA-256 values. Old manifests remain valid. No source URL or approval evidence
+is exported by key collection. Bundle-key inspection verifies the complete archive
+and sidecar before staging candidate bytes in private state. Candidate review binds
+to those bytes, repository ID, and archive digest. The existing expiring review and
+explicit confirmation remain the only route to approval. Public-key candidates
+never enter import validation, publication, or client trust automatically.

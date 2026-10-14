@@ -15,6 +15,8 @@ type Job = { id: string; operation: string; status: string; stage: string; creat
   snapshot_id?: string; plan?: Plan; result?: { path?: string; sha256?: string; bytes?: number;
   files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
   source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
+type BundleKeyCandidate = { candidate_id: string; repository_id: string; sha256: string; bundle_name: string;
+  bundle_sha256: string; snapshot_id: string; scanned_at: string; trusted: false };
 type Publication = { snapshot_id: string; published_at: string; verified_at: string; base_url: string;
   job_id: string; config_url: string; client_config: string; bytes: number; os: { major: string; arch: string };
   repositories: Record<string, { packages: number; metadata_types: string[]; signing_keys?: SigningKey[] }> };
@@ -27,7 +29,7 @@ type Snapshot = { id: string; created: string; status: string; package_bytes: nu
   export?: ExportRecord | null;
   repositories: Record<string, { packages: number; metadata_types: string[] }> };
 type ExportRecord = { snapshot_id: string; exported_at: string | null; verified_at?: string; bytes: number;
-  path: string; checksum_path: string; sha256: string; state: 'available' | 'missing' | 'changed' | 'unverified'; reason: string };
+  path: string; checksum_path: string; sha256: string; bundled_signing_keys?: number; state: 'available' | 'missing' | 'changed' | 'unverified'; reason: string };
 type Connected = { phase: 'select' | 'sync' | 'export' | 'verify' | 'ready' | 'failed' | 'running';
   action: string | null; reason: string; active: Job | null; attention_job: Job | null;
   latest_sync: Snapshot | null; selection_snapshot: Snapshot | null; latest_export: ExportRecord | null;
@@ -47,6 +49,7 @@ type State = { version: string; role: string; os: { name: string; major: string;
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
   jobs: Job[]; snapshots: Snapshot[]; incoming: IncomingBundle[];
   signing_key_files?: string[]; trusted_signing_keys?: { repository_id: string; signing_keys: SigningKey[] }[];
+  bundle_key_candidates?: BundleKeyCandidate[];
   import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
   publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null;
     availability: { state: 'not_published' | 'available' | 'unavailable'; reason: string } } | null;
@@ -93,12 +96,37 @@ function SigningKeys({ state, disabled, onTrusted }: { state: State; disabled: b
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  useEffect(() => {
+    if (review) {
+      const element = document.getElementById('dc-signing-key-review');
+      element?.focus({ preventScroll: true });
+      element?.scrollIntoView({ block: 'start' });
+    }
+  }, [review]);
   const resetReview = () => { setReview(undefined); setConfirmed(false); setNotice(''); };
   const act = async (action: () => Promise<void>) => {
     setBusy(true); setError('');
     try { await action(); } catch (error) { setError(errorText(error)); } finally { setBusy(false); }
   };
   return <>
+    <Card><CardTitle>Public keys included in transfer bundles</CardTitle><CardBody>
+      <p>Use <strong>Review bundled keys</strong> in Incoming bundles to verify an archive and list its supplied public keys. Including a key in a bundle does not grant trust.</p>
+      {!state.bundle_key_candidates?.length && <p>No bundled keys have been inspected yet. Older bundles can still use a separately supplied public key.</p>}
+      {state.bundle_key_candidates?.map(candidate => {
+        const approved = state.trusted_signing_keys?.some(repo => repo.repository_id === candidate.repository_id && repo.signing_keys.some(key => key.sha256 === candidate.sha256));
+        return <div className="dc-key-review" key={candidate.candidate_id}>
+          <strong>{candidate.repository_id}</strong> <Label color={approved ? 'blue' : 'orange'}>{approved ? 'Already approved for this repository' : 'Untrusted candidate'}</Label>
+          <p>Bundle: <code>{candidate.bundle_name}</code></p>
+          <p>Public key SHA-256: <code>{candidate.sha256}</code></p>
+          <p>Archive SHA-256: <code>{candidate.bundle_sha256}</code></p>
+          <p>Inspected <Timestamp value={candidate.scanned_at} /></p>
+          <Button variant="secondary" isDisabled={disabled || busy} onClick={() => { void act(async () => {
+            resetReview(); setRepository(candidate.repository_id); setFile(''); setArmor('');
+            setReview(await call<KeyReview>(['review-signing-key'], { bundle_key: candidate.candidate_id }));
+          }); }}>Review bundled public key</Button>
+        </div>;
+      })}
+    </CardBody></Card>
     <Card><CardTitle>Review and approve repository signing keys</CardTitle><CardBody>
       <p>Select a public key from the saved transfer folder, choose a public-key file on your computer, or paste its ASCII-armored contents. Review its full fingerprint against a trusted source before approval.</p>
       <p>Approval applies to this repository inside Disconnected Content. Keys are pinned to successful imports and carried into publication and client setup. The extension does not add them to this host's system-wide RPM keyring.</p>
@@ -122,9 +150,10 @@ function SigningKeys({ state, disabled, onTrusted }: { state: State; disabled: b
       <Button isDisabled={disabled || busy || !repository.trim() || (!file && !armor.trim())} onClick={() => { void act(async () => {
         resetReview(); setReview(await call<KeyReview>(['review-signing-key'], { repository_id: repository, ...(file ? { key_file: file } : { public_key: armor }) }));
       }); }}>Review public key</Button>
-      {review && <section className="dc-key-review" aria-label="Public signing key review">
+      {review && <section id="dc-signing-key-review" tabIndex={-1} className="dc-key-review" aria-label="Public signing key review">
         <Title headingLevel="h2" size="lg">Confirm the signing key</Title>
         <p>Repository: <strong>{review.repository_id}</strong></p>
+        <p>Source: {review.source}</p>
         <p>Identity: {review.user_ids.join(' · ') || 'No user ID'}</p>
         <p>Full fingerprint: <code>{review.fingerprint}</code></p>
         <p>Expires: {review.expires ? <Timestamp value={review.expires} /> : 'No expiration recorded'}</p>
@@ -322,6 +351,7 @@ function ExportDetails({ bundle }: { bundle: ExportRecord }) {
     <p>{bundle.reason}</p>
     <div><strong>Last exported</strong><FreshTime value={bundle.exported_at} /></div>
     {bundle.verified_at && <div><strong>Last verified</strong><FreshTime value={bundle.verified_at} /></div>}
+    <p>{bundle.bundled_signing_keys === undefined ? 'Bundled signing-key count was not recorded for this older export.' : `${bundle.bundled_signing_keys} public signing keys included · review and approval required on the disconnected host`}</p>
     <strong>Transfer both files</strong><code>{bundle.path}</code><code>{bundle.checksum_path}</code>
     <details><summary>Checksum and transfer evidence</summary><p>SHA-256</p><code>{bundle.sha256}</code>
       <p>Transfer and disconnected import are not confirmed by this host. Use your approved transfer process.</p>
@@ -694,8 +724,13 @@ function App() {
               <p className="dc-muted">File modified <Timestamp value={bundle.modified} /></p>
               {bundle.state && <><Label color={['known', 'imported'].includes(bundle.state) ? 'blue' : bundle.state === 'blocked' ? 'orange' : 'grey'}>{incomingLabel(bundle)}</Label>
                 <p className="dc-muted">{bundle.reason}</p></>}</div>
+              <div className="dc-actions"><Button variant="secondary" isDisabled={disabled || sourceDirty || !bundle.has_checksum || bundle.state === 'blocked'}
+                onClick={() => { void act(async () => {
+                  const result = await call<{ keys: number }>(['scan-bundle-keys'], { bundle_name: bundle.name });
+                  setTab('keys'); setNotice(result.keys ? `${result.keys} bundled public signing ${result.keys === 1 ? 'key requires' : 'keys require'} review. No trust was granted.` : 'This bundle contains no public signing keys. You can provide a key separately.');
+                }); }}>Review bundled keys</Button>
               <Button isDisabled={disabled || sourceDirty || !bundle.has_checksum || bundle.state === 'blocked' || !state.capabilities.allow_unsigned_imports}
-                onClick={() => { void start('import', bundle.name); }}>{['known', 'imported'].includes(bundle.state ?? '') ? 'Recheck bundle' : 'Import bundle'}</Button></div>)}
+                onClick={() => { void start('import', bundle.name); }}>{['known', 'imported'].includes(bundle.state ?? '') ? 'Recheck bundle' : 'Import bundle'}</Button></div></div>)}
           </CardBody></Card>
         </>}
         {tab === 'profile' && <Card><CardTitle>Choose content to mirror</CardTitle><CardBody>
