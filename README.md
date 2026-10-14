@@ -199,9 +199,16 @@ It requires additional storage for the public copy; the reserve is checked on
 the publication filesystem. Logs, jobs, inbox archives, snapshot state files, and
 unindexed files are excluded. Private staging is outside the Apache alias.
 
-Remote Ansible execution remains a design discussion. See
-[client automation options](docs/automation-options.md) for suggested repository
-configuration and update workflows.
+The **Ansible client automation** section provides two downloadable playbooks,
+an example inventory, and run instructions. Configure a canary client's pinned
+repositories, preview security updates with `--check --diff`, then apply during
+a maintenance window. The update playbook requires the exact paired repository
+file and advisory metadata, selects only its publication's repository IDs, runs
+one host at a time, and stops on failure. Neither playbook reboots clients.
+
+Run the downloads from your existing Ansible Core 2.16+ control node. Cockpit does
+not store client credentials or execute Ansible. See [client automation](docs/automation-options.md)
+for prerequisites, commands, and the later AAP integration direction.
 
 ## Development and publication hygiene
 

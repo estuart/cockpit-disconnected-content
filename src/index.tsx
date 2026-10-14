@@ -14,7 +14,8 @@ type Job = { id: string; operation: string; status: string; stage: string; creat
   files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
   source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
 type Publication = { snapshot_id: string; published_at: string; verified_at: string; base_url: string;
-  config_url: string; client_config: string; bytes: number; os: { major: string; arch: string } };
+  job_id: string; config_url: string; client_config: string; bytes: number; os: { major: string; arch: string } };
+type Automation = { snapshot_id: string; has_updateinfo: boolean; files: Record<string, string> };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
   imported?: boolean; source_created?: string; verified_at?: string;
   repositories: Record<string, { packages: number; metadata_types: string[] }> };
@@ -43,10 +44,50 @@ function bytes(value: number) {
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
 }
-function downloadConfig(content: string) {
+function downloadFile(content: string, filename: string) {
   const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
-  const link = document.createElement('a'); link.href = url; link.download = 'disconnected-content.repo'; link.click();
+  const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function ClientAutomation({ publication }: { publication: Publication }) {
+  const [automation, setAutomation] = useState<Automation>();
+  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    let mounted = true;
+    setAutomation(undefined); setError('');
+    void call<Automation>(['client-automation', publication.job_id]).then(result => {
+      if (mounted) setAutomation(result);
+    }).catch(e => { if (mounted) setError(errorText(e)); });
+    return () => { mounted = false; };
+  }, [publication.job_id, revision]);
+  return <div>
+    <Title headingLevel="h2" size="lg">Ansible client automation</Title>
+    <p>Download the paired playbooks for this publication and run them from your Ansible control node. Start with a canary host, configure its repositories, then preview and apply security updates.</p>
+    {error ? <Alert variant="danger" isInline title="Unable to generate playbooks">{error}
+      <Button variant="link" onClick={() => setRevision(value => value + 1)}>Retry downloads</Button></Alert> : !automation ? <Spinner size="md" aria-label="Generating playbook downloads" /> : <>
+      {!automation.has_updateinfo && <Alert variant="warning" isInline title="Security advisory metadata is missing">
+        Repository configuration is available. The security playbook will stop until every selected repository supplies updateinfo metadata. Mirror that metadata and publish again.</Alert>}
+      <div className="dc-actions">{[
+        ['configure-repos.yml', 'Download configure repos playbook'],
+        ['security-updates.yml', 'Download security updates playbook'],
+        ['inventory.ini', 'Download example inventory'],
+        ['README-client-automation.txt', 'Download run instructions'],
+      ].map(([filename, label]) => <Button key={filename} variant="secondary"
+        onClick={() => downloadFile(automation.files[filename], filename)}>{label}</Button>)}</div>
+      <p>Requires Ansible Core 2.16 or newer, SSH and administrative access to compatible RHEL clients, Python DNF bindings, and independently trusted RPM signing keys. Playbooks use built-in modules, process one host at a time, and stop on failure.</p>
+      <pre className="dc-config" aria-label="Ansible run commands">{`# Edit inventory.ini, then preview and configure a canary host
+ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org --check --diff
+ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org --diff
+# Preview security updates before applying them
+ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org --check --diff
+ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org`}</pre>
+      <p className="dc-muted">These downloads stay pinned to snapshot {automation.snapshot_id}. The update playbook requires the exact paired repository configuration and selects only its repository IDs. Check mode can refresh DNF cache metadata. Neither playbook reboots hosts; package scripts may restart services. Cockpit does not run the playbooks or store client credentials.</p>
+      <details><summary>Preview playbooks and instructions</summary>{Object.entries(automation.files).map(([name, content]) => <div key={name}>
+        <h3>{name}</h3><pre className="dc-config" aria-label={name}>{content}</pre></div>)}</details>
+    </>}
+  </div>;
 }
 function Timestamp({ value }: { value: string }) {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return <span>Not recorded</span>;
@@ -219,7 +260,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.5.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.6.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -353,7 +394,7 @@ function App() {
             <p>Client platform: RHEL {state.publication.current.os.major} · {state.publication.current.os.arch}</p>
             <p>Latest client configuration: <code>{state.publication.current.config_url}</code></p>
             <p>Install this file on compatible client hosts as <code>/etc/yum.repos.d/disconnected-content.repo</code>. Each repository URL is pinned to this snapshot. To adopt newly published content, install its new configuration file.</p>
-            <div className="dc-actions"><Button variant="secondary" onClick={() => downloadConfig(state.publication!.current!.client_config)}>Download .repo file</Button>
+            <div className="dc-actions"><Button variant="secondary" onClick={() => downloadFile(state.publication!.current!.client_config, 'disconnected-content.repo')}>Download .repo file</Button>
               <Button variant="secondary" onClick={() => { void act(() => navigator.clipboard.writeText(state.publication!.current!.client_config), 'Repository configuration copied'); }}>Copy .repo contents</Button></div>
             <pre className="dc-config" aria-label="Client repository configuration">{state.publication.current.client_config}</pre>
             <Title headingLevel="h2" size="lg">Configure and check client hosts</Title>
@@ -365,6 +406,7 @@ sudo dnf --disablerepo='*' --enablerepo='dc-*' makecache --refresh
 sudo dnf --disablerepo='*' --enablerepo='dc-*' updateinfo list security
 sudo dnf --disablerepo='*' --enablerepo='dc-*' upgrade --security --assumeno`}</pre>
             <p className="dc-muted">The preview does not apply updates. After reviewing the transaction and your maintenance policy, an administrator can run the upgrade without --assumeno. Publication does not configure clients, initiate updates, or reboot hosts.</p>
+            <ClientAutomation key={state.publication.current.job_id} publication={state.publication.current} />
           </CardBody></Card> : <Card><CardBody>No snapshot has been published yet. Publish one to generate the client configuration.</CardBody></Card>}
         </>}
         {tab === 'snapshots' && <>

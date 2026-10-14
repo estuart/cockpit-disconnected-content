@@ -179,3 +179,43 @@ client VM or full BaseOS/AppStream patching. TLS, HTTP client authentication,
 client rollout automation, reboot policy, cross-repository dependency closure,
 and production-scale retention remain further work. Public repository content
 and the current client configuration remain available for inspection.
+
+## Downloadable Ansible client playbooks
+
+Version 0.6.0 adds paired, publication-pinned repository and security-update
+playbooks, an example inventory, and run instructions.
+
+- All 64 backend tests pass, along with TypeScript checking and the production
+  build. New coverage includes durable-publication selection, role and identifier
+  restrictions, missing advisory metadata, and rejection of mismatched or injected
+  publication values.
+- Parsed generated YAML with Ansible's loader and ran `ansible-playbook
+  --syntax-check` for both playbooks using Ansible Core 2.16.16. CI additionally
+  checks generated playbooks with Ansible Core 2.19.
+- Deployed both updated RPMs from local files on the isolated publisher. Browser
+  checks downloaded all four artifacts, compared their exact contents with the
+  durable publication, verified filenames and run commands, opened previews,
+  and observed no extension JavaScript exceptions.
+- Ran the actual generated playbooks in a disposable RHEL 10.2 UBI client
+  container on the connected build host. The container had no default IPv4 or
+  IPv6 route, a specific route to the publisher, and failed internet reachability
+  checks before and after the transaction. Its test-only Ansible controller used
+  a local connection inside that container; no SSH inventory or remote credentials
+  were used for this execution test.
+- Confirmed the security playbook rejected missing configuration. Repository
+  check mode predicted the file change without writing it; applying configured
+  the repositories and refreshed their HTTP metadata. Re-running configuration
+  reported no change. A modified configuration was rejected before updating.
+- Seeded a signed `pacemaker-doc-3.0.0-5.el10.noarch` from the published repository.
+  Security check mode predicted an update and left that installed version intact.
+  Applying the playbook installed `pacemaker-doc-3.0.1-5.el10_2.1.noarch`; a second
+  security run reported no change. Other repositories were excluded from the
+  transaction, and RPM signature checking remained enabled.
+- Removed the disposable client container, temporary HTTP firewall allowance,
+  browser session, and local tunnel. The normal publisher and Cockpit services
+  remain available with outbound isolation preserved.
+
+This validates the generated tasks and a real security transaction in an isolated
+RHEL container. A separate full client VM, customer SSH/become policies, broad
+BaseOS/AppStream coverage, multi-host failure handling, reboot orchestration,
+and AAP job launch remain outside the tested boundary.

@@ -18,3 +18,5 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: python3 -m unittest discover -s tests -v
+      - run: python3 -m pip install 'ansible-core>=2.19,<2.20'
+      - run: python3 scripts/check-playbooks.py

@@ -11,6 +11,10 @@
 - Clients are pinned to published snapshots and must receive a new `.repo` file
   to advance. Publishing does not initiate remote updates or Ansible jobs. A
   public copy consumes additional space; retention and deletion remain manual.
+- Downloadable Ansible playbooks run manually on an existing control node. AAP
+  integration, credential storage, external job tracking, reboot orchestration,
+  and automatic rollback are not implemented. Security filtering depends on the
+  mirrored advisory coverage and does not establish complete CVE remediation.
 - The profile mirrors existing repositories using the host's existing release and
   entitlement configuration. Cross-major mirroring, EUS selection, architectures,
   and release-policy management are not implemented.

@@ -88,3 +88,23 @@ The prototype assumes an existing system administrator. A later limited-operator
 mode should expose narrowly defined backend methods and enforce authorization in
 the backend, with polkit as appropriate. Cockpit UI permission checks are for
 presentation and are never an authorization boundary.
+
+## Downloadable client automation
+
+The root helper's read-only `client-automation <publication-job-id>` command loads
+one durable publication record and generates two YAML playbooks, an inventory
+example, and instructions. It accepts only a validated publication identifier
+and the disconnected role. The frontend uses the publication ID shown in the
+current publication card, so a newer publication cannot change an in-progress
+download request. The helper regenerates the pinned repository configuration
+and checks it matches the recorded file before emitting artifacts. Runtime
+serialization uses the Python standard library; Ansible is only a development
+validation dependency and runs on the customer's existing control node.
+
+Configuration embeds exact repository URLs and checks RHEL platform and signing
+key prerequisites. Security updates require a regular, non-symlink repository
+file with the expected SHA-256, advisory metadata for every selected repository,
+and the same platform. DNF operations explicitly select only that publication's
+repository IDs. Both plays use serial execution and stop on a host failure.
+Cockpit never executes the generated playbooks, stores remote credentials, or
+claims external playbook runs as local job evidence. AAP integration is deferred.

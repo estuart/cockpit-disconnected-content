@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.5.0
+Version: 0.6.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: LicenseRef-Proprietary
@@ -64,6 +64,8 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 %dir %attr(0700,root,root) /var/www/disconnected-content/.staging
 
 %changelog
+* Wed Oct 14 2026 Project contributors - 0.6.0-1
+- Add pinned downloadable Ansible playbooks for client repositories and security updates
 * Wed Oct 14 2026 Project contributors - 0.5.0-1
 - Add Apache publication and generated client repository configuration
 * Wed Oct 14 2026 Project contributors - 0.4.0-1

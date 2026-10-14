@@ -1,7 +1,7 @@
 // Run against an already authenticated, isolated Cockpit test session.
 // Deployment addresses and screenshots belong in ignored local state.
 import { chromium, expect } from '@playwright/test';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 const url = process.env.COCKPIT_TEST_URL;
 if (!url) throw new Error('Set COCKPIT_TEST_URL to the isolated Cockpit test session');
@@ -112,6 +112,37 @@ try {
     console.log('GUI rejected an invalid source, saved and scanned the selected directory, persisted it across reload, and displayed bundle timestamps');
   }
   await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+  if (process.argv.includes('--check-automation')) {
+    if (!disconnected || !initialState.publication?.current) throw new Error('Publish a snapshot before checking automation downloads');
+    const publication = initialState.publication.current;
+    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    await expect(app.getByRole('heading', { name: 'Ansible client automation', exact: true })).toBeVisible();
+    const expected = await app.evaluate(async jobId => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'client-automation', jobId], { superuser: 'require', err: 'message' })), publication.job_id);
+    for (const [filename, label] of [
+      ['configure-repos.yml', 'Download configure repos playbook'],
+      ['security-updates.yml', 'Download security updates playbook'],
+      ['inventory.ini', 'Download example inventory'],
+      ['README-client-automation.txt', 'Download run instructions'],
+    ]) {
+      const event = page.waitForEvent('download');
+      await app.getByRole('button', { name: label, exact: true }).click();
+      const download = await event;
+      expect(download.suggestedFilename()).toBe(filename);
+      const path = `.local/browser-${filename}`;
+      await download.saveAs(path);
+      expect(await readFile(path, 'utf8')).toBe(expected.files[filename]);
+    }
+    await expect(app.getByLabel('Ansible run commands', { exact: true })).toContainText('security-updates.yml --limit client.example.org --check --diff');
+    await app.getByText('Preview playbooks and instructions', { exact: true }).click();
+    await expect(app.getByLabel('configure-repos.yml', { exact: true })).toContainText(`/snapshots/${publication.snapshot_id}/`);
+    await expect(app.getByLabel('security-updates.yml', { exact: true })).toContainText('"security": true');
+    await app.getByText('Preview playbooks and instructions', { exact: true }).click();
+    await app.getByRole('button', { name: 'Download configure repos playbook', exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: '.local/cockpit-ansible-downloads.png', fullPage: true });
+    console.log('All four automation downloads matched the durable publication, filenames and run commands passed, and playbook previews show the pinned snapshot and security filter');
+    await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+  }
   if (process.argv.includes('--run-publish')) {
     const origin = process.env.COCKPIT_TEST_PUBLIC_URL;
     if (!disconnected || !origin) throw new Error('Publication check requires the disconnected role and COCKPIT_TEST_PUBLIC_URL');

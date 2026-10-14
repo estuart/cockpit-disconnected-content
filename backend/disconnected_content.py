@@ -28,7 +28,7 @@ import uuid
 from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -254,6 +254,134 @@ def client_repo_config(origin, snapshot):
     return "\n".join(lines)
 
 
+def yaml_document(value, indent=0):
+    """Emit the small JSON-compatible YAML subset used by generated playbooks."""
+    pad = " " * indent
+
+    def scalar(item):
+        if isinstance(item, str) and "\n" in item and item.endswith("\n") and not item.endswith("\n\n"):
+            return " |\n" + "".join(pad + "  " + line + "\n" for line in item.splitlines())
+        return " " + json.dumps(item) + "\n"
+
+    if isinstance(value, dict):
+        return "".join(pad + json.dumps(key) + ":" + (
+            "\n" + yaml_document(item, indent + 2) if isinstance(item, (dict, list)) else
+            scalar(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return "".join(pad + "-" + (
+            "\n" + yaml_document(item, indent + 2) if isinstance(item, (dict, list)) else
+            scalar(item)) for item in value)
+    raise ValueError("Unsupported playbook structure")
+
+
+def client_automation(publication):
+    """Generate inert downloads from one durable publication, never run Ansible."""
+    sid = publication["snapshot_id"]
+    repos = publication["repositories"]
+    platform = publication["os"]
+    if (not isinstance(repos, dict) or not 1 <= len(repos) <= 20
+            or not re.fullmatch(r"[0-9]{1,2}", platform["major"])
+            or not re.fullmatch(r"[A-Za-z0-9_]+", platform["arch"])):
+        raise ValueError("Invalid publication platform or repository list")
+    config = client_repo_config(publication["base_url"], {"id": sid, "repositories": repos})
+    if config != publication["client_config"]:
+        raise ValueError("Publication configuration does not match its snapshot")
+    ids = ["dc-" + rid for rid in sorted(repos)]
+    advisory = all("updateinfo" in repo.get("metadata_types", []) for repo in repos.values())
+    common = [{"name": "Require the publication's RHEL platform and Ansible Core 2.16 or newer",
+               "ansible.builtin.assert": {"that": [
+                   "ansible_version.full is version('2.16', '>=')",
+                   "ansible_facts['distribution'] == 'RedHat'",
+                   f"ansible_facts['distribution_major_version'] == '{platform['major']}'",
+                   f"ansible_facts['architecture'] == '{platform['arch']}'"],
+                   "fail_msg": "Use compatible RHEL clients and Ansible Core 2.16 or newer."}},
+              {"name": "Check for the independently provisioned Red Hat RPM public keys",
+               "ansible.builtin.stat": {"path": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"},
+               "register": "dc_key"},
+              {"name": "Require trusted RPM keys before using the repository",
+               "ansible.builtin.assert": {"that": ["dc_key.stat.exists", "dc_key.stat.isreg | default(false)"],
+                   "fail_msg": "Provision and verify Red Hat RPM keys independently before continuing."}}]
+    configure = {"name": "Configure repositories for snapshot " + sid,
+                 "hosts": "disconnected_clients", "become": True, "gather_facts": True,
+                 "serial": 1, "any_errors_fatal": True, "pre_tasks": common,
+                 "tasks": [
+                     {"name": "Install the exact pinned repository file (back up an existing file)",
+                      "ansible.builtin.copy": {"dest": "/etc/yum.repos.d/disconnected-content.repo",
+                          "content": config, "owner": "root", "group": "root", "mode": "0644", "backup": True}},
+                     {"name": "Refresh metadata using only this publication's repositories",
+                      "ansible.builtin.command": {"argv": ["dnf", "--disablerepo=*", *["--enablerepo=" + rid for rid in ids],
+                          "makecache", "--refresh"]}, "changed_when": False, "when": "not ansible_check_mode"},
+                     {"name": "Explain repository check mode",
+                      "ansible.builtin.debug": {"msg": "Check mode previews the repository file only. Apply this playbook before previewing security updates; metadata refresh is skipped in check mode."},
+                      "when": "ansible_check_mode"}]}
+    security = {"name": "Apply security updates from snapshot " + sid,
+                "hosts": "disconnected_clients", "become": True, "gather_facts": True,
+                "serial": 1, "any_errors_fatal": True,
+                "pre_tasks": common + [
+                    {"name": "Require advisory metadata in every published repository",
+                     "ansible.builtin.assert": {"that": [advisory],
+                         "fail_msg": "This publication lacks updateinfo metadata. Mirror advisory metadata and publish again before using security-only updates."}},
+                    {"name": "Check the pinned repository file without following symlinks",
+                     "ansible.builtin.stat": {"path": "/etc/yum.repos.d/disconnected-content.repo",
+                         "checksum_algorithm": "sha256", "follow": False}, "register": "dc_repo"},
+                    {"name": "Require the exact repository file before updating (run configure-repos.yml first)",
+                     "ansible.builtin.assert": {"that": ["dc_repo.stat.isreg | default(false)",
+                         "not (dc_repo.stat.islnk | default(false))",
+                         "dc_repo.stat.checksum | default('') == '" + hashlib.sha256(config.encode()).hexdigest() + "'"],
+                         "fail_msg": "Repository file is missing or differs from this snapshot. Run its configure-repos.yml first."}}],
+                "tasks": [
+                    {"name": "Apply available security updates to installed packages from the pinned repositories",
+                     "ansible.builtin.dnf": {"name": "*", "state": "latest", "security": True,
+                         "update_only": True, "disablerepo": ["*"], "enablerepo": ids,
+                         "disable_gpg_check": False, "update_cache": True, "use_backend": "dnf4"},
+                     "register": "dc_updates"},
+                    {"name": "Show the transaction result; reboots remain an operator decision",
+                     "ansible.builtin.debug": {"var": "dc_updates"}}]}
+    header = "# Generated by Disconnected Content. Review before running.\n# Snapshot: " + sid + "\n---\n"
+    inventory = ("# Replace the example host and user. Keep credentials in your existing Ansible setup.\n"
+                 "[disconnected_clients]\nclient.example.org ansible_user=admin\n")
+    instructions = f"""Disconnected Content client automation
+Snapshot: {sid}
+Published: {publication['published_at']}
+Platform: RHEL {platform['major']} / {platform['arch']}
+
+Run manually from an Ansible Core 2.16+ control node that can SSH to the clients.
+Clients require Python 3 with python3-dnf, sudo/become access, independently
+trusted Red Hat RPM keys, and network access to the published repository URLs.
+Only ansible.builtin modules are used; no Galaxy collection download is needed.
+
+1. Save all four downloads together. Review both playbooks and inventory.ini.
+   Replace client.example.org and the SSH user with your approved client inventory.
+   Use your existing SSH keys and become credentials. Add --ask-become-pass if needed.
+2. Preview repository configuration on a canary host:
+   ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org --check --diff
+3. Apply repository configuration and refresh metadata:
+   ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org --diff
+4. Preview the security transaction, then apply during your maintenance window:
+   ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org --check --diff
+   ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org
+5. Review the result before expanding --limit to the next approved client group.
+
+Both playbooks run one host at a time and stop the play on a failure. Neither
+playbook reboots hosts. Package scripts may restart services during an update.
+Check mode can refresh DNF cache metadata, but does not install package updates.
+Configuration check mode does not refresh metadata or install the repository file.
+The security playbook requires the exact repository file embedded in its paired
+configuration playbook and updateinfo metadata in every selected repository.
+Security filtering depends on the advisories and packages actually mirrored;
+zero updates does not establish that the host is fully patched. Dependencies may
+also change. Other repository files are retained; update transactions select only
+the exact repository IDs in this publication. Existing DNF policy still applies.
+URLs stay pinned to this snapshot. Download a new pair when advancing clients.
+Changing repositories does not undo installed updates. No automatic rollback,
+remote execution from Cockpit, credential storage, or AAP integration is included.
+"""
+    return {"snapshot_id": sid, "has_updateinfo": advisory, "files": {
+        "configure-repos.yml": header + yaml_document([configure]),
+        "security-updates.yml": header + yaml_document([security]),
+        "inventory.ini": inventory, "README-client-automation.txt": instructions}}
+
+
 def bundle_manifest(archive, max_bytes, max_files):
     first = archive.next()
     if first is None or first.name != "manifest.json" or not first.isfile() or not 0 <= first.size <= 32 * 1024 * 1024:
@@ -369,6 +497,16 @@ class Engine:
         return {"installed": installed, "server_active": active,
                 "base_url": self.config.get("public_base_url", ""),
                 "current": read_json(path) if path.exists() else None}
+
+    def client_automation(self, publication_id):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Client automation requires the disconnected installation role")
+        if not isinstance(publication_id, str) or not ID.fullmatch(publication_id):
+            raise ValueError("Invalid publication identifier")
+        path = self.root / "publications" / f"{publication_id}.json"
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("Publish a snapshot before downloading client automation")
+        return client_automation(read_json(path))
 
     def save_publication_settings(self, data):
         if self.config.get("role") != "disconnected":
@@ -927,7 +1065,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "client-automation", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -939,6 +1077,8 @@ def main():
     engine = Engine()
     if args.command == "status":
         result = engine.status()
+    elif args.command == "client-automation":
+        result = engine.client_automation(args.argument)
     elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories"}:
         raw = sys.stdin.read(16385)
         if len(raw) > 16384:
