@@ -68,8 +68,12 @@ RPM and transfer archive were then copied over the retained management channel.
   package from the imported snapshot. This is not a statement about all RHEL CVEs.
 - Confirmed public HTTPS and the internal subscription server remained blocked
   after the update. SSH/Cockpit management access was retained.
+- Rebooted the test VM and confirmed a changed boot ID, active isolation service,
+  no IPv4/IPv6 default routes, preserved imported snapshot and installed package,
+  and continued rejection of public HTTPS, CDN, and internal content-server access.
 
-This proves a transferred mirror can be imported and used for an offline
+This is logical disconnection with inbound management access retained, rather
+than a physical air gap. It proves a transferred mirror can be imported and used for an offline
 advisory-driven package update. The package selected was documentation with no
 additional dependencies. Full BaseOS/AppStream patching, cross-repository
 dependency closure, HTTP distribution, and fleet operations remain separate tests.
@@ -84,5 +88,5 @@ exceptions. Browser artifacts and machine-specific diagnostics remain local-only
 HTTP publication, separate network client consumption, BaseOS/AppStream at full
 scale, other RHEL/Cockpit releases, FIPS
 mode, manifest signing and trust provisioning, storage exhaustion under concurrent
-workloads, actual host reboot recovery, and upgrade/uninstallation behavior with
+workloads, interrupted-worker recovery across a reboot, and upgrade/uninstallation behavior with
 active jobs.
