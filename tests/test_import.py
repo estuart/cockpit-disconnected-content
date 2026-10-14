@@ -1,10 +1,12 @@
 """Disconnected import trust gates, atomic visibility, and hostile archive cases."""
 import io
 import json
+import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import patch
 
 from test_engine import engine, fixture
@@ -55,6 +57,9 @@ class DisconnectedImport(unittest.TestCase):
         self.assertTrue(saved["imported"])
         self.assertEqual(saved["repositories"][self.rid]["packages"], 1)
         self.assertFalse(saved["authenticated"])
+        self.assertIn("verified_at", saved)
+        self.assertEqual(saved["verified_at"], self.job["result"]["verified_at"])
+        self.assertIn("updated", self.job)
         self.assertFalse(list((self.target.root / ".imports").iterdir()))
 
     def test_unsigned_imports_require_explicit_admin_opt_in(self):
@@ -90,6 +95,8 @@ class DisconnectedImport(unittest.TestCase):
         self.import_valid()
         self.target.import_bundle(self.job)
         self.assertTrue(self.job["result"]["already_imported"])
+        self.assertIn("checked_at", self.job["result"])
+        self.assertNotIn("verified_at", self.job["result"])
         self.assertEqual(len(list((self.target.root / "snapshots").iterdir())), 1)
 
     def test_symlink_inbox_entry_is_not_accepted(self):
@@ -97,6 +104,23 @@ class DisconnectedImport(unittest.TestCase):
         alias.symlink_to(self.path)
         with self.assertRaisesRegex(ValueError, "Symlinks"):
             self.target.bundle_path("alias.tar")
+
+    def test_import_from_external_directory_records_lifecycle_and_evidence(self):
+        media = (Path(self.temp.name) / "media").resolve()
+        media.mkdir()
+        self.path.rename(media / self.path.name)
+        self.path.with_suffix(".tar.sha256").rename(media / (self.path.name + ".sha256"))
+        self.target.config["incoming_dir"] = str(media)
+        with patch.object(engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            job = self.target.start("import", self.path.name)
+        with patch.object(engine, "validate_repository", return_value=self.summary):
+            self.target.run(job["id"])
+        saved = engine.read_json(self.target.job_path(job["id"]))
+        self.assertEqual(saved["status"], "succeeded")
+        for key in ["created", "started", "updated", "finished"]:
+            self.assertIn(key, saved)
+        self.assertIn("verified_at", saved["result"])
+        self.assertTrue((media / self.path.name).exists())
 
     def test_declared_size_limit_is_enforced(self):
         with self.assertRaisesRegex(ValueError, "size limit"):
@@ -125,6 +149,113 @@ class DisconnectedImport(unittest.TestCase):
         stream = engine.LimitedMetadataReader(io.BytesIO(b"a" * 20), limit=10)
         with self.assertRaisesRegex(ValueError, "size limit"):
             stream.read()
+
+
+class ImportSourceSettings(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config_path = self.root / "config.json"
+        self.config = {"role": "disconnected", "state_dir": str(self.root / "state"),
+                       "reserve_gib": 0, "allow_unsigned_imports": False, "max_import_gib": 2}
+        engine.write_json(self.config_path, self.config)
+        config_patch = patch.object(engine, "CONFIG", self.config_path)
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+        self.app = engine.Engine()
+        self.media = self.root / "transfer media"
+        self.media.mkdir()
+
+    def save(self, path=None):
+        return self.app.save_import_settings({"incoming_dir": str(path or self.media)})
+
+    def test_source_is_persisted_without_changing_policy_or_moving_content(self):
+        old = self.app.root / "incoming" / "old.tar"
+        old.write_bytes(b"existing")
+        self.save()
+        reopened = engine.Engine()
+        self.assertEqual(reopened.incoming_directory(), self.media)
+        saved = engine.read_json(self.config_path)
+        self.assertFalse(saved["allow_unsigned_imports"])
+        self.assertEqual(saved["max_import_gib"], 2)
+        self.assertIn("incoming_updated_at", saved)
+        self.assertEqual(old.read_bytes(), b"existing")
+        self.assertEqual(list(self.media.iterdir()), [])
+
+    def test_invalid_sources_do_not_replace_saved_settings(self):
+        self.save()
+        alias = self.root / "alias"
+        alias.symlink_to(self.media, target_is_directory=True)
+        ordinary_file = self.root / "file"
+        ordinary_file.touch()
+        for value in ["relative/path", str(self.root / "missing"), str(alias), str(ordinary_file),
+                      str(alias / "child"), str(self.root / ".." / "transfer"), "https://example.invalid", "", None]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.app.save_import_settings({"incoming_dir": value})
+        self.assertEqual(engine.Engine().incoming_directory(), self.media)
+
+    def test_settings_cannot_change_role_or_import_trust_policy(self):
+        with self.assertRaisesRegex(ValueError, "only the bundle source"):
+            self.app.save_import_settings({"incoming_dir": str(self.media), "allow_unsigned_imports": True})
+        self.app.config["role"] = "connected"
+        with self.assertRaisesRegex(ValueError, "disconnected installation"):
+            self.save()
+
+    def test_scan_is_shallow_newest_first_with_modification_timestamps(self):
+        self.save()
+        for name, modified in [("new.tar", 200), ("old.tar", 100)]:
+            path = self.media / name
+            path.write_bytes(b"bundle")
+            os.utime(path, (modified, modified))
+        (self.media / "new.tar.sha256").write_text("checksum")
+        (self.media / "alias.tar").symlink_to(self.media / "new.tar")
+        (self.media / "old.tar.sha256").symlink_to(self.media / "new.tar.sha256")
+        (self.media / "subdir").mkdir()
+        (self.media / "subdir" / "nested.tar").touch()
+        source, bundles = self.app.scan_incoming()
+        self.assertTrue(source["available"])
+        self.assertIn("scanned_at", source)
+        self.assertEqual([b["name"] for b in bundles], ["new.tar", "old.tar"])
+        self.assertEqual(bundles[0]["modified"], "1970-01-01T00:03:20+00:00")
+        self.assertTrue(bundles[0]["has_checksum"])
+        self.assertFalse(bundles[1]["has_checksum"])
+
+    def test_missing_media_does_not_break_status_and_scan_recovers(self):
+        self.save()
+        self.media.rmdir()
+        with patch.object(engine, "repositories", return_value=[]), patch.object(engine, "host_os", return_value={}):
+            status = self.app.status()
+        self.assertFalse(status["import_source"]["available"])
+        self.assertIn("unavailable", status["import_source"]["error"])
+        self.assertEqual(status["incoming"], [])
+        self.media.mkdir()
+        self.assertTrue(self.app.scan_incoming()[0]["available"])
+
+    def test_running_import_pins_source_and_blocks_settings_changes(self):
+        self.save()
+        (self.media / "bundle.tar").write_bytes(b"bundle")
+        with patch.object(engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            job = self.app.start("import", "bundle.tar")
+        self.assertEqual(job["incoming_dir"], str(self.media))
+        self.assertIn("created", job)
+        self.assertIn("updated", job)
+        with self.assertRaisesRegex(ValueError, "active job"):
+            self.save(self.app.root / "incoming")
+
+    def test_worker_uses_recorded_source_directory(self):
+        # A queued record remains unambiguous even if configuration is subsequently edited.
+        self.save()
+        (self.media / "bundle.tar").write_bytes(b"bundle")
+        selected = self.app.bundle_path("bundle.tar", str(self.media))
+        self.app.config["incoming_dir"] = str(self.app.root / "incoming")
+        self.assertEqual(self.app.bundle_path("bundle.tar", str(self.media)), selected)
+
+    def test_nonregular_checksum_is_not_offered(self):
+        self.save()
+        (self.media / "bundle.tar").touch()
+        os.mkfifo(self.media / "bundle.tar.sha256")
+        self.assertFalse(self.app.incoming()[0]["has_checksum"])
 
 
 if __name__ == "__main__":

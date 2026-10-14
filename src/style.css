@@ -22,6 +22,13 @@ body { margin: 0; background: var(--pf-t--global--background--color--secondary--
 .dc-plan strong { font-size: 20px; }
 .dc-profile-controls { display: grid; grid-template-columns: auto 100px minmax(160px, 1fr); align-items: center; gap: 16px; margin: 24px 0 16px; }
 .dc-selection { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; }
+.dc-source-controls { display: grid; gap: 10px; margin: 20px 0; }
+.dc-source-controls .dc-actions { margin-top: 4px; }
+.dc-source-status { display: grid; gap: 8px; margin-bottom: 24px; }
+.dc-source-status code, .dc-content p code { overflow-wrap: anywhere; }
+.dc-timeline { display: flex; flex-wrap: wrap; gap: 12px 28px; margin: 16px 0; font-size: 13px; }
+.dc-timeline dt { font-weight: 600; }
+.dc-timeline dd { margin: 4px 0 0; }
 .dc-repos { max-height: 460px; overflow: auto; border-top: 1px solid var(--pf-t--global--border--color--default); }
 .dc-repo { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; padding: 16px 4px; border-bottom: 1px solid var(--pf-t--global--border--color--default); }
 .dc-repo .pf-v6-c-check { min-width: 0; overflow-wrap: anywhere; }

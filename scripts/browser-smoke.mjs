@@ -7,6 +7,8 @@ const url = process.env.COCKPIT_TEST_URL;
 if (!url) throw new Error('Set COCKPIT_TEST_URL to the isolated Cockpit test session');
 await mkdir('.local', { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
+let app;
+let restoreSource;
 try {
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1500, height: 1100 } });
   let page = await context.newPage();
@@ -29,15 +31,11 @@ try {
   await monitor(page);
   await page.goto(url);
   await expect(page.getByRole('link', { name: 'Disconnected Content', exact: true })).toBeVisible();
-  const limited = page.getByRole('button', { name: 'Limited access', exact: true });
-  if (await limited.isVisible()) {
-    await limited.click();
-    await expect(limited).toBeHidden({ timeout: 15000 });
-  }
+  // The extension requests administrative access through cockpit.spawn itself.
   await page.getByRole('link', { name: 'Disconnected Content', exact: true }).click();
   // Cockpit may have several loaded frames; resolve the extension by its URL.
   await expect.poll(() => page.frames().some(f => f.url().includes('/disconnected-content/'))).toBe(true);
-  let app = page.frames().find(f => f.url().includes('/disconnected-content/'));
+  app = page.frames().find(f => f.url().includes('/disconnected-content/'));
   await expect(app.getByRole('heading', { name: 'Disconnected Content', exact: true })).toBeVisible();
   await expect(app.getByText('Available storage', { exact: true })).toBeVisible({ timeout: 15000 });
   const initialState = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
@@ -45,6 +43,31 @@ try {
   const disconnected = initialState.role === 'disconnected';
   await app.getByRole('tab', { name: disconnected ? 'Incoming bundles' : 'Repositories', exact: true }).click();
   await expect(app.getByText(disconnected ? 'Transfer inbox' : 'Choose content to mirror', { exact: true })).toBeVisible();
+  if (process.argv.includes('--check-source')) {
+    const source = process.env.COCKPIT_TEST_SOURCE;
+    if (!disconnected || !source) throw new Error('Source workflow requires the disconnected role and COCKPIT_TEST_SOURCE');
+    restoreSource = initialState.import_source.path;
+    const status = () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
+    await app.getByRole('textbox', { name: 'Bundle source directory', exact: true }).fill('relative/path');
+    await app.getByRole('button', { name: 'Save & scan', exact: true }).click();
+    await expect(app.getByText('Enter an absolute directory path without parent traversal', { exact: true })).toBeVisible();
+    expect((await status()).import_source.path).toBe(restoreSource);
+    await app.getByRole('textbox', { name: 'Bundle source directory', exact: true }).fill(source);
+    await app.getByRole('button', { name: 'Save & scan', exact: true }).click();
+    await expect.poll(async () => (await status()).import_source.path).toBe(source);
+    await expect(app.getByText('Bundle source saved and scanned', { exact: false })).toBeVisible();
+    await page.reload();
+    await page.getByRole('link', { name: 'Disconnected Content', exact: true }).click();
+    await expect.poll(() => page.frames().some(f => f.url().includes('/disconnected-content/'))).toBe(true);
+    app = page.frames().find(f => f.url().includes('/disconnected-content/'));
+    await app.getByRole('tab', { name: 'Incoming bundles', exact: true }).click();
+    await expect(app.getByRole('textbox', { name: 'Bundle source directory', exact: true })).toHaveValue(source);
+    expect((await status()).import_source.available).toBe(true);
+    await expect(app.locator('.dc-repo time').first()).toBeVisible();
+    await page.screenshot({ path: '.local/cockpit-source.png', fullPage: true });
+    console.log('GUI rejected an invalid source, saved and scanned the selected directory, persisted it across reload, and displayed bundle timestamps');
+  }
   await app.getByRole('tab', { name: 'Overview', exact: true }).click();
   if (process.argv.includes('--run-import')) {
     if (!disconnected) throw new Error('Import browser check requires the disconnected role');
@@ -61,7 +84,14 @@ try {
     await app.getByRole('tab', { name: /^Snapshots/ }).click();
     await expect(app.getByText('Local repository URLs', { exact: true }).first()).toBeVisible({ timeout: 15000 });
     await page.screenshot({ path: '.local/cockpit-import.png', fullPage: true });
-    console.log('Browser-started disconnected import, signature verification, and local snapshot visibility passed');
+    await app.getByRole('tab', { name: 'Jobs & evidence', exact: true }).click();
+    await expect(app.getByText(/Evidence verified|Archive matched existing snapshot/).first()).toBeVisible({ timeout: 15000 });
+    const latestJob = app.locator('.pf-v6-c-card').first();
+    for (const label of ['Queued', 'Started', 'Last updated', 'Finished', 'Duration']) {
+      await expect(latestJob.locator('dt').filter({ hasText: new RegExp(`^${label}$`) })).toBeVisible();
+    }
+    await page.screenshot({ path: '.local/cockpit-job-timestamps.png', fullPage: true });
+    console.log('Browser-started disconnected import completed; snapshot visibility and timestamped job evidence passed');
     await app.getByRole('tab', { name: 'Overview', exact: true }).click();
   }
   if (process.argv.includes('--run-cycle')) {
@@ -106,5 +136,16 @@ try {
   if (errors.length) throw new Error(errors.join('\n'));
   if (backgroundErrors.size) console.log('Other Cockpit pages reported background exceptions:', [...backgroundErrors].join(', '));
   console.log('Cockpit navigation, privileged backend status, repository screen, and overview rendering passed');
-  await context.close();
-} finally { await browser.close(); }
+} finally {
+  if (restoreSource && app) {
+    try {
+      await app.evaluate(async path => {
+        const process = window.cockpit.spawn(['/usr/libexec/disconnected-content', 'save-import-settings'],
+          { superuser: 'require', err: 'message' });
+        process.input(JSON.stringify({ incoming_dir: path }));
+        await process;
+      }, restoreSource);
+    } catch (error) { console.error('Source restoration requires attention:', error); process.exitCode = 1; }
+  }
+  await browser.close();
+}

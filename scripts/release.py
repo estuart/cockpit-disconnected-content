@@ -4,7 +4,7 @@ from pathlib import Path
 import tarfile
 
 root = Path(__file__).resolve().parents[1]
-version = "0.2.0"
+version = "0.3.0"
 output = root / "build" / f"cockpit-disconnected-content-{version}.tar.gz"
 output.parent.mkdir(exist_ok=True)
 with tarfile.open(output, "w:gz") as archive:

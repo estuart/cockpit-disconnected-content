@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -26,7 +27,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 HELPER = "/usr/libexec/disconnected-content"
 GIB = 1024 ** 3
@@ -38,7 +39,7 @@ NS_COMMON = "{http://linux.duke.edu/metadata/common}"
 
 
 def now():
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
 
 
 def write_json(path, data):
@@ -282,7 +283,7 @@ def verify_archive(path, extract_to=None, max_bytes=2000 * GIB, max_files=200000
             seen.add(member.name)
         if seen != set(expected):
             raise ValueError("Archive is missing files")
-    return {"files_verified": len(seen), "snapshot_id": manifest["snapshot_id"],
+    return {"files_verified": len(seen), "snapshot_id": manifest["snapshot_id"], "verified_at": now(),
             "authenticated": False, "note": "Unsigned prototype bundle; hashes verify integrity only."}
 
 
@@ -292,6 +293,7 @@ class Engine:
         self.root = Path(self.config["state_dir"])
         if not self.root.is_absolute():
             raise ValueError("state_dir must be absolute")
+        self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
         for sub in ("jobs", "snapshots", "exports", "incoming", ".imports"):
@@ -311,6 +313,40 @@ class Engine:
     def profile(self):
         path = self.root / "profile.json"
         return read_json(path) if path.exists() else {"repositories": [], "max_gib": 20}
+
+    def incoming_directory(self, value=None):
+        value = value if value is not None else self.config.get("incoming_dir", str(self.root / "incoming"))
+        if not isinstance(value, str) or not value or len(value) > 4096 or any(ord(c) < 32 for c in value):
+            raise ValueError("Enter an absolute directory path on this host")
+        path = Path(value)
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("Enter an absolute directory path without parent traversal")
+        # Canonical paths keep removable-media aliases from silently changing the source.
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError("Use a real directory path, without symlinks")
+        if not path.is_dir():
+            raise ValueError("Source directory is unavailable; mount the media or choose an existing directory")
+        return path
+
+    def save_import_settings(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Source settings require the disconnected installation role")
+        if not isinstance(data, dict) or set(data) != {"incoming_dir"}:
+            raise ValueError("Specify only the bundle source directory")
+        if not isinstance(data["incoming_dir"], str):
+            raise ValueError("Enter an absolute directory path on this host")
+        path = self.incoming_directory(data["incoming_dir"])
+        # Test readability without creating, moving, or changing source files.
+        with os.scandir(path) as entries:
+            next(entries, None)
+        with self.lock():
+            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+                raise ValueError("Wait for the active job to finish before changing the source directory")
+            config = read_json(CONFIG)
+            config.update(incoming_dir=str(path), incoming_updated_at=now())
+            write_json(CONFIG, config)
+            self.config = config
+        return {"path": str(path), "updated_at": config["incoming_updated_at"]}
 
     def save_profile(self, data):
         if self.config.get("role") != "connected":
@@ -340,7 +376,7 @@ class Engine:
                     with self.lock():
                         current = read_json(path)
                         if current["status"] in {"queued", "running"}:
-                            current.update(status="interrupted", stage="Job stopped before completion", finished=now())
+                            current.update(status="interrupted", stage="Job stopped before completion", finished=now(), updated=now())
                             write_json(path, current)
                             job = current
             result.append(job)
@@ -354,24 +390,48 @@ class Engine:
         jobs = self.jobs()
         snapshots = [read_json(p) for p in (self.root / "snapshots").glob("*/snapshot.json")]
         usage = shutil.disk_usage(self.root)
+        source, incoming = self.scan_incoming() if self.config.get("role") == "disconnected" else (None, [])
         return {"version": VERSION, "role": self.config.get("role"), "os": host_os(),
                 "storage": {"path": str(self.root), "free": usage.free, "total": usage.total,
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
-                "incoming": self.incoming() if self.config.get("role") == "disconnected" else [],
+                "incoming": incoming, "import_source": source,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": False,
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
 
-    def incoming(self):
-        return [{"name": p.name, "bytes": p.stat().st_size,
-                 "has_checksum": p.with_suffix(".tar.sha256").is_file()}
-                for p in sorted((self.root / "incoming").glob("*.tar"))
-                if BUNDLE_NAME.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
+    def scan_incoming(self):
+        source = {"path": self.config.get("incoming_dir", str(self.root / "incoming")),
+                  "updated_at": self.config.get("incoming_updated_at"), "scanned_at": now(), "available": False}
+        result = []
+        try:
+            directory = self.incoming_directory()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not BUNDLE_NAME.fullmatch(entry.name):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if not stat.S_ISREG(info.st_mode):
+                            continue
+                        sidecar = directory / (entry.name + ".sha256")
+                        result.append({"name": entry.name, "bytes": info.st_size,
+                                       "modified": dt.datetime.fromtimestamp(info.st_mtime, dt.timezone.utc).isoformat(),
+                                       "has_checksum": not sidecar.is_symlink() and sidecar.is_file()})
+                    except FileNotFoundError:
+                        continue  # A transfer may be renamed while the inbox is being scanned.
+            source["available"] = True
+        except (OSError, ValueError) as error:
+            source["error"] = str(error)
+            result = []
+        return source, sorted(result, key=lambda item: (item["modified"], item["name"]), reverse=True)
 
-    def bundle_path(self, name):
+    def incoming(self):
+        return self.scan_incoming()[1]
+
+    def bundle_path(self, name, directory=None):
         if not isinstance(name, str) or not BUNDLE_NAME.fullmatch(name):
             raise ValueError("Select a transfer archive from the incoming directory")
-        path = safe_path(self.root / "incoming", name)
+        path = safe_path(self.incoming_directory(directory), name)
         if not path.is_file():
             raise ValueError("Transfer archive is missing")
         return path
@@ -382,10 +442,12 @@ class Engine:
         if operation == "import":
             if self.config.get("role") != "disconnected":
                 raise ValueError("Import requires the disconnected installation role")
-            self.bundle_path(snapshot_id)
         elif self.config.get("role") != "connected":
             raise ValueError("This installation does not permit connected operations")
         with self.lock():
+            source = self.incoming_directory() if operation == "import" else None
+            if source is not None:
+                self.bundle_path(snapshot_id, str(source))
             # Read files directly: reconciliation in jobs() acquires the same lock.
             if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
                 raise ValueError("Another job is active; wait for it to finish or stop it")
@@ -400,14 +462,15 @@ class Engine:
                     raise ValueError("Only validated snapshots can be exported")
             jid = uuid.uuid4().hex
             job = {"id": jid, "operation": operation, "status": "queued", "stage": "Waiting for worker",
-                   "created": now(), "profile": profile, "snapshot_id": snapshot_id if operation != "import" else None}
+                   "created": now(), "updated": now(), "profile": profile, "snapshot_id": snapshot_id if operation != "import" else None}
             if operation == "import":
                 job["bundle_name"] = snapshot_id
+                job["incoming_dir"] = str(source)
             write_json(self.job_path(jid), job)
             started = subprocess.run(["/usr/bin/systemctl", "start", "--no-block", self.unit(jid)],
                                      capture_output=True, text=True, check=False)
             if started.returncode:
-                job.update(status="failed", stage="Cannot start worker service", finished=now())
+                job.update(status="failed", stage="Cannot start worker service", finished=now(), updated=now())
                 write_json(self.job_path(jid), job)
                 raise ValueError("Cannot start worker service; inspect the service journal")
         return job
@@ -417,11 +480,13 @@ class Engine:
             raise ValueError("Import requires the disconnected installation role")
         if self.config.get("allow_unsigned_imports") is not True:
             raise ValueError("Unsigned imports are disabled; an administrator must explicitly enable prototype imports")
-        path = self.bundle_path(job["bundle_name"])
+        path = self.bundle_path(job["bundle_name"], job.get("incoming_dir"))
         limit = int(self.config.get("max_import_gib", 200)) * GIB
         if path.stat().st_size > limit + GIB:
             raise ValueError("Transfer archive exceeds the import size limit")
-        sidecar = safe_path(self.root / "incoming", path.name + ".sha256")
+        sidecar = safe_path(path.parent, path.name + ".sha256")
+        if not sidecar.is_file():
+            raise ValueError("A regular checksum sidecar is required beside the archive")
         if sidecar.stat().st_size > 1024:
             raise ValueError("Checksum sidecar is too large")
         match = re.fullmatch(r"([a-f0-9]{64}) [ *]" + re.escape(path.name) + r"\n?", sidecar.read_text())
@@ -442,6 +507,7 @@ class Engine:
             existing = read_json(destination / "snapshot.json")
             if existing.get("source_archive_sha256") == checksum:
                 self.update(job, snapshot_id=sid, result={"snapshot_id": sid, "already_imported": True,
+                                                        "checked_at": now(), "source_archive_sha256": checksum,
                                                         "authenticated": False})
                 return
             raise ValueError("A different snapshot already uses this identifier")
@@ -457,7 +523,9 @@ class Engine:
             for rid in manifest["repositories"]:
                 checked[rid] = validate_repository(staging / "repositories" / rid,
                                                   require_updateinfo=("baseos" in rid or "appstream" in rid))
-            snapshot = {"id": sid, "created": now(), "status": "validated", "os": manifest["os"],
+            verified["verified_at"] = now()
+            snapshot = {"id": sid, "created": now(), "verified_at": verified["verified_at"],
+                        "source_created": manifest.get("created"), "status": "validated", "os": manifest["os"],
                         "repositories": checked, "package_bytes": sum(r["package_bytes"] for r in checked.values()),
                         "imported": True, "source_archive_sha256": checksum, "authenticated": False}
             write_json(staging / "snapshot.json", snapshot)
@@ -476,7 +544,7 @@ class Engine:
             raise ValueError("Save a profile using repositories configured on this host")
 
     def update(self, job, **values):
-        job.update(values)
+        job.update(values, updated=now())
         write_json(self.job_path(job["id"]), job)
 
     def run_command(self, args, job, stage):
@@ -640,23 +708,24 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "save-profile", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise ValueError("Administrative access is required")
-    # Configuration is installed by the administrator, never supplied by the browser.
+    # The browser can update only the source directory; all other policy remains administrator-owned.
     if CONFIG.is_symlink() or CONFIG.stat().st_uid != 0 or CONFIG.stat().st_mode & 0o022:
         raise ValueError("Configuration must be root-owned and not writable by group or others")
     engine = Engine()
     if args.command == "status":
         result = engine.status()
-    elif args.command == "save-profile":
+    elif args.command in {"save-profile", "save-import-settings"}:
         raw = sys.stdin.read(16385)
         if len(raw) > 16384:
             raise ValueError("Profile is too large")
-        result = engine.save_profile(json.loads(raw))
+        data = json.loads(raw)
+        result = engine.save_profile(data) if args.command == "save-profile" else engine.save_import_settings(data)
     elif args.command == "start":
         engine.jobs()
         result = engine.start(args.argument, args.snapshot)

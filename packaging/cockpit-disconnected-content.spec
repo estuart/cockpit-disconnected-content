@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.2.0
+Version: 0.3.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: LicenseRef-Proprietary
@@ -46,6 +46,8 @@ snapshots through the Cockpit web console. HTTP publication is a planned capabil
 %{_unitdir}/disconnected-content-job@.service
 
 %changelog
+* Wed Oct 14 2026 Project contributors - 0.3.0-1
+- Add configurable import sources and timestamped job evidence
 * Wed Oct 14 2026 Project contributors - 0.2.0-1
 - Add validated disconnected imports and a transfer inbox
 * Wed Oct 14 2026 Project contributors - 0.1.0-1

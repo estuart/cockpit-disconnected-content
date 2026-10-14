@@ -27,6 +27,13 @@
   necessary before a production release.
 - The importer requires matching RHEL major version/architecture and an existing
   trusted RPM keyring. It never downloads missing keys or dependencies.
+- The GUI selects an existing directory on the server. It does not mount USB
+  media, browse a workstation's files, or upload bundles. Scans are shallow and
+  imports are explicit. A mounted path is not bound to a particular device UUID;
+  operators must ensure the expected media is mounted there.
+- File modification times may be preserved during transfer and do not establish
+  arrival time or content freshness. Source creation times are unsigned manifest
+  data. Historical jobs may lack timestamps introduced by later engine versions.
 - Failed sync/export jobs retain partial content. Failed imports remove private
   staging and do not expose a snapshot. Root can inspect and
   remove them when no related job is active. Never remove an active job's files.

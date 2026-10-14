@@ -17,6 +17,8 @@ RHEL sync host and the disconnected role on a separate RHEL system.
 - Job history, local command output, and explicit failed/interrupted states.
 - A disconnected transfer inbox with bounded archive validation, compatibility
   checks, independent RPM signature checks, and atomic snapshot visibility.
+- A GUI-configured bundle source directory with newest-first file timestamps,
+  job lifecycle times, elapsed duration, and timestamped verification evidence.
 
 HTTP publication, incremental transfers, signed bundle manifests, and fleet
 patching are not implemented. This is an independently maintained prototype;
@@ -113,10 +115,15 @@ explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
 administrator. This does not authenticate the manifest; RPM signatures are still
 required and validated against the host's independently provisioned RPM keyring.
 
-1. Initialize the directories with `sudo /usr/libexec/disconnected-content status`.
-2. Stage the `.tar` and matching `.tar.sha256` in the state directory's `incoming/`
-   folder, owned by root. Copy them through the approved transfer process.
-3. Open **Incoming bundles** and choose **Import bundle**.
+1. Open **Incoming bundles** and enter an existing **Bundle source directory** on
+   the disconnected host. The default is the state directory's `incoming/` folder.
+   A mounted transfer-media directory such as `/mnt/transfer` is also supported.
+2. Choose **Save & scan** to persist the source. Stage the `.tar` and matching
+   `.tar.sha256` there using the approved transfer process, then **Scan now**.
+   The source must be a real directory without symlink components. Only that
+   directory is scanned; subdirectories are not searched. Mounting media and
+   transferring files are currently administrator tasks outside the application.
+3. Choose **Import bundle**. The application never imports automatically.
 4. Follow the job under **Jobs & evidence**. A failed import leaves no usable
    snapshot and removes its private extraction staging directory.
 5. Open **Snapshots** for validation results and local `file://` repository URLs.
@@ -127,6 +134,23 @@ and trusted RPM signatures. Archive ownership, modes, links, special files, spar
 files, duplicate members, and unexpected paths are not accepted or applied.
 An identical bundle can be imported again without duplicating or replacing its
 snapshot. HTTP serving and client promotion are separate future features.
+
+The source directory is separate from managed snapshot storage. The GUI saves
+only `incoming_dir` and its settings timestamp in the root-owned configuration;
+it cannot change the role, state directory, size limits, or unsigned-import policy.
+Saving does not create, move, delete, or change permissions on source files.
+It requires administrative access and is blocked while a job is active. Each
+import records its selected source directory in the job. Missing media is shown
+as unavailable without hiding existing snapshots or job history.
+
+Incoming bundles are sorted by filesystem modification time, newest first.
+Copying may preserve this time, so it is not an arrival timestamp. Jobs show
+queued, started, last-updated, and finished times where recorded, plus duration.
+Successful archive checks record a verification timestamp; identical reimports
+record when the archive matched the existing snapshot. Imported snapshots also
+show their import time and source bundle creation time. Dates include the
+browser's local timezone; hovering a timestamp reveals its original ISO value.
+Older records retain the evidence they actually captured without invented dates.
 
 ## Development and publication hygiene
 

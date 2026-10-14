@@ -9,14 +9,18 @@ type Repo = { id: string; name: string; enabled: boolean };
 type Plan = { packages: number; package_bytes: number; required_free: number;
   free_bytes: number; within_budget: boolean; enough_space: boolean };
 type Job = { id: string; operation: string; status: string; stage: string; created: string;
+  started?: string; finished?: string; updated?: string; bundle_name?: string; incoming_dir?: string;
   snapshot_id?: string; plan?: Plan; result?: { path?: string; sha256?: string; bytes?: number;
-  files_verified?: number; authenticated?: boolean } };
+  files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
+  source_archive_sha256?: string; already_imported?: boolean } };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
+  imported?: boolean; source_created?: string; verified_at?: string;
   repositories: Record<string, { packages: number; metadata_types: string[] }> };
 type State = { version: string; role: string; os: { name: string; major: string; arch: string };
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
-  jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; has_checksum: boolean }[];
+  jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; modified: string; has_checksum: boolean }[];
+  import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
   capabilities: { allow_unsigned_imports: boolean } };
 type CockpitProcess = Promise<string> & { input: (data: string) => void };
 declare global { interface Window { cockpit: {
@@ -33,7 +37,19 @@ function bytes(value: number) {
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
 }
-function date(value: string) { return new Date(value).toLocaleString(); }
+function Timestamp({ value }: { value: string }) {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return <span>Not recorded</span>;
+  return <time dateTime={value} title={value}>{new Date(value).toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+  })}</time>;
+}
+function duration(job: Job) {
+  if (!job.started) return undefined;
+  const seconds = Math.max(0, Math.floor(((job.finished ? Date.parse(job.finished) : Date.now()) - Date.parse(job.started)) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+}
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error); }
 function color(status: string): 'green' | 'red' | 'blue' | 'orange' | 'grey' {
   return status === 'succeeded' || status === 'validated' ? 'green' :
@@ -51,6 +67,8 @@ function App() {
   const [budget, setBudget] = useState('20');
   const [filter, setFilter] = useState('');
   const [dirty, setDirty] = useState(false);
+  const [sourcePath, setSourcePath] = useState('');
+  const [sourceDirty, setSourceDirty] = useState(false);
   const [log, setLog] = useState<{ id: string; text: string }>();
   const [ready, setReady] = useState(false);
   const refresh = async () => {
@@ -58,6 +76,9 @@ function App() {
     setState(next);
     return next;
   };
+  useEffect(() => {
+    if (!sourceDirty && state?.import_source) setSourcePath(state.import_source.path);
+  }, [state?.import_source?.path, sourceDirty]);
   useEffect(() => {
     let mounted = true;
     let inFlight = false;
@@ -67,7 +88,7 @@ function App() {
       try {
         const next = await call<State>(['status']);
         if (!mounted) return;
-        setState(next); setError('');
+        setState(next);
         if (!ready) {
           setSelected(next.profile.repositories); setBudget(String(next.profile.max_gib)); setReady(true);
         }
@@ -103,7 +124,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.2.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.3.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -155,11 +176,34 @@ function App() {
             <p>Checksums verify integrity, not provenance. Every imported RPM is independently checked against the host's trusted signing keys.</p>
           </Alert>
           <Card><CardTitle>Transfer inbox</CardTitle><CardBody>
-            <p>Stage the archive and matching .sha256 file in <code>{state.storage.path}/incoming</code>. Import validates the entire bundle before a snapshot becomes available.</p>
-            {!state.incoming.length && <p>No transfer archives are staged yet.</p>}
+            <Title headingLevel="h2" size="lg">1. Choose a bundle source</Title>
+            <p>Enter an existing directory on this disconnected host, such as a local staging folder or mounted transfer media. The app scans this folder only; it does not search subdirectories.</p>
+            <div className="dc-source-controls"><label htmlFor="bundle-source">Bundle source directory</label>
+              <TextInput id="bundle-source" value={sourcePath} isDisabled={disabled} placeholder="/mnt/transfer"
+                onChange={(_, value) => { setSourcePath(value); setSourceDirty(true); }} />
+              <div className="dc-actions"><Button isDisabled={disabled || !sourcePath.trim()}
+                onClick={() => { void act(async () => {
+                  await call(['save-import-settings'], { incoming_dir: sourcePath }); setSourceDirty(false);
+                }, 'Bundle source saved and scanned'); }}>Save &amp; scan</Button>
+                <Button variant="secondary" isDisabled={busy || sourceDirty} onClick={() => { void act(refresh); }}>Scan now</Button>
+                {sourceDirty && <><Label color="orange">Unsaved source changes</Label>
+                  <Button variant="link" onClick={() => { setSourcePath(state.import_source?.path ?? ''); setSourceDirty(false); }}>Discard changes</Button></>}
+              </div></div>
+            {state.import_source && <div className="dc-source-status">
+              <p><strong>Scanning:</strong> <code>{state.import_source.path}</code></p>
+              <p className="dc-muted">Last scanned <Timestamp value={state.import_source.scanned_at} />
+                {state.import_source.updated_at && <> · Source saved <Timestamp value={state.import_source.updated_at} /></>}</p>
+              {!state.import_source.available && <Alert variant="warning" isInline title="Bundle source unavailable">
+                <p>{state.import_source.error}</p><p>Mount the media at the saved path or save another existing directory, then scan again.</p></Alert>}
+            </div>}
+            <Title headingLevel="h2" size="lg">2. Stage and import a bundle</Title>
+            <p>Place the archive and matching <code>.tar.sha256</code> file in the saved source directory using your approved transfer process. Import copies verified content into managed snapshot storage at <code>{state.storage.path}/snapshots</code>; source files remain in place.</p>
+            <p className="dc-muted">Newest file modification first. Modification times come from the source filesystem and may be preserved during copying. Times are shown in your browser's local timezone.</p>
+            {!state.incoming.length && state.import_source?.available && <p>No transfer archives were found in this directory.</p>}
             {state.incoming.map(bundle => <div className="dc-repo" key={bundle.name}><div><strong>{bundle.name}</strong>
-              <p>{bytes(bundle.bytes)} · {bundle.has_checksum ? 'Checksum sidecar present' : 'Checksum sidecar missing'}</p></div>
-              <Button isDisabled={disabled || !bundle.has_checksum || !state.capabilities.allow_unsigned_imports}
+              <p>{bytes(bundle.bytes)} · {bundle.has_checksum ? 'Checksum sidecar present' : 'Checksum sidecar missing'}</p>
+              <p className="dc-muted">File modified <Timestamp value={bundle.modified} /></p></div>
+              <Button isDisabled={disabled || sourceDirty || !bundle.has_checksum || !state.capabilities.allow_unsigned_imports}
                 onClick={() => { void start('import', bundle.name); }}>Import bundle</Button></div>)}
           </CardBody></Card>
         </>}
@@ -182,7 +226,9 @@ function App() {
         {tab === 'snapshots' && <>
           {!state.snapshots.length && <Card><CardTitle>No validated snapshots yet</CardTitle><CardBody>{disconnected ? 'Import a transfer bundle to create the first snapshot.' : 'Complete a sync to create the first snapshot.'}</CardBody></Card>}
           {state.snapshots.map(snapshot => <Card key={snapshot.id}><CardTitle><span>Snapshot {snapshot.id.slice(0, 8)}</span> <Label color="green">Validated</Label></CardTitle><CardBody>
-            <p>{date(snapshot.created)} · {bytes(snapshot.package_bytes)} of RPM content</p>
+            <p>{snapshot.imported ? 'Imported' : 'Created'} <Timestamp value={snapshot.created} /> · {bytes(snapshot.package_bytes)} of RPM content</p>
+            {snapshot.source_created && <p className="dc-muted">Bundle created on source <Timestamp value={snapshot.source_created} /></p>}
+            {snapshot.verified_at && <p className="dc-muted">Content verified <Timestamp value={snapshot.verified_at} /></p>}
             <ul className="dc-snapshot-repos">{Object.entries(snapshot.repositories).map(([rid, result]) => <li key={rid}>
               <strong>{rid}</strong><br />{result.packages.toLocaleString()} packages · metadata and package checksums verified · RPM signatures verified<br />
               <span className="dc-muted">Advisory metadata: {result.metadata_types.includes('updateinfo') ? 'present' : 'not supplied by this repository'}</span></li>)}</ul>
@@ -193,9 +239,20 @@ function App() {
           </CardBody></Card>)}
         </>}
         {tab === 'jobs' && <>
+          <p className="dc-muted">Newest jobs first · Times shown in your browser's local timezone. Earlier jobs display the timestamps recorded by their version of the engine.</p>
           {!state.jobs.length && <Card><CardBody>No jobs have run yet.</CardBody></Card>}
           {state.jobs.map(job => <Card key={job.id}><CardTitle><span className="dc-job-name">{job.operation}</span> <Label color={color(job.status)}>{job.status}</Label></CardTitle><CardBody>
-            <p>{job.stage}</p><p className="dc-muted">{date(job.created)} · {job.id}</p>
+            <p>{job.stage}</p>
+            <dl className="dc-timeline"><div><dt>Queued</dt><dd><Timestamp value={job.created} /></dd></div>
+              {job.started && <div><dt>Started</dt><dd><Timestamp value={job.started} /></dd></div>}
+              {job.updated && <div><dt>Last updated</dt><dd><Timestamp value={job.updated} /></dd></div>}
+              {job.finished && <div><dt>Finished</dt><dd><Timestamp value={job.finished} /></dd></div>}
+              {job.started && <div><dt>{job.finished ? 'Duration' : 'Elapsed'}</dt><dd>{duration(job)}</dd></div>}</dl>
+            <p className="dc-muted">Job {job.id}</p>
+            {job.bundle_name && <p>Source bundle: <code>{job.incoming_dir ? `${job.incoming_dir}/` : ''}{job.bundle_name}</code></p>}
+            {job.result?.verified_at && <p>Evidence verified <Timestamp value={job.result.verified_at} /> · {job.result.files_verified} archive files checked</p>}
+            {job.result?.checked_at && <p>Archive matched existing snapshot <Timestamp value={job.result.checked_at} /></p>}
+            {job.result?.source_archive_sha256 && <div className="dc-export"><strong>Imported archive SHA-256</strong><code>{job.result.source_archive_sha256}</code></div>}
             {job.plan && <p>{job.plan.packages.toLocaleString()} packages · {bytes(job.plan.package_bytes)} declared content</p>}
             {job.result?.path && <div className="dc-export"><strong>Transfer bundle</strong><code>{job.result.path}</code>
               <strong>SHA-256</strong><code>{job.result.sha256}</code>

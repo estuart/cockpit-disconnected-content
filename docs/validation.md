@@ -90,3 +90,28 @@ scale, other RHEL/Cockpit releases, FIPS
 mode, manifest signing and trust provisioning, storage exhaustion under concurrent
 workloads, interrupted-worker recovery across a reboot, and upgrade/uninstallation behavior with
 active jobs.
+
+## Import source workflow and chronology
+
+Version 0.3.0 adds source-directory configuration and timestamped evidence.
+
+- Forty backend tests pass, including source persistence without policy changes,
+  invalid/missing/symlink paths, shallow newest-first scans, symlink/nonregular
+  checksum handling, missing-media recovery, active-job settings protection,
+  imports from an external directory, and lifecycle/verification timestamps.
+- TypeScript checking and the production frontend build pass.
+- Built an updated noarch RPM on the connected RHEL host and installed it on the
+  disconnected VM with all repositories disabled.
+- Through Cockpit, rejected a relative source path without changing the saved
+  source, saved a separate staging directory, and confirmed persistence after a
+  full browser reload. Bundle modification times were visible with timezone labels.
+- Started an import from that directory through the GUI. The identical archive
+  matched the existing validated snapshot without creating a duplicate. The job
+  displayed queued/start/update/finish times, duration, its recorded source path,
+  archive SHA-256, and when the match was checked.
+- Restored the default inbox after the browser test. Existing snapshots and
+  historical jobs remained accessible; earlier records were not backfilled with
+  invented verification timestamps.
+
+This GUI check used a local staging directory, not physical removable media.
+Mounting media and moving bundle files remain administrator tasks.

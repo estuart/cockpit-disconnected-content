@@ -2,8 +2,10 @@
 
 The Cockpit page uses the documented `cockpit.spawn` API to call a root-owned
 helper. Each call uses an argument array and requires administrative access.
-The helper reads only a root-owned configuration file at a fixed path. Browser
-requests cannot choose an executable, destination directory, or arbitrary URL.
+The helper reads a root-owned configuration file at a fixed path. An administrator
+can save only a local import source directory through the GUI; destination
+storage and trust policy remain in administrator-managed configuration. Browser
+requests cannot choose an executable or arbitrary URL.
 
 Starting a job writes a durable JSON record under an exclusive lock and starts a
 systemd template service. The service owns the process tree. State is replaced
@@ -23,7 +25,12 @@ Each sync creates a new directory. No mutation, pruning, or deletion of an older
 validated snapshot is performed. Partial content is retained for diagnosis but is
 not exposed as a valid snapshot. Initial retention and cleanup are manual.
 
-The disconnected importer accepts bundles only from the fixed local inbox. It
+The disconnected importer accepts bundles only from the saved local source
+directory, defaulting to the state's `incoming/` folder. Source settings are
+atomically saved under the job lock and cannot change while a job is active.
+Each queued import records its source path, which the worker uses. Scans reject
+symlink source components and nonregular archive/checksum entries, do not recurse,
+and report unavailable media without breaking the rest of the status response. It
 verifies the outer checksum, bounds the manifest, checks major version and
 architecture, streams regular files into private staging, and independently
 validates repository contents and RPM signatures. A same-filesystem rename makes
