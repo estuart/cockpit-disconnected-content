@@ -12,7 +12,9 @@ type Job = { id: string; operation: string; status: string; stage: string; creat
   started?: string; finished?: string; updated?: string; bundle_name?: string; incoming_dir?: string;
   snapshot_id?: string; plan?: Plan; result?: { path?: string; sha256?: string; bytes?: number;
   files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
-  source_archive_sha256?: string; already_imported?: boolean } };
+  source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
+type Publication = { snapshot_id: string; published_at: string; verified_at: string; base_url: string;
+  config_url: string; client_config: string; bytes: number; os: { major: string; arch: string } };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
   imported?: boolean; source_created?: string; verified_at?: string;
   repositories: Record<string, { packages: number; metadata_types: string[] }> };
@@ -21,6 +23,7 @@ type State = { version: string; role: string; os: { name: string; major: string;
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
   jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; modified: string; has_checksum: boolean }[];
   import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
+  publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null } | null;
   capabilities: { allow_unsigned_imports: boolean } };
 type CockpitProcess = Promise<string> & { input: (data: string) => void };
 type DirectoryListing = { path: string; parent: string | null; truncated: boolean;
@@ -39,6 +42,11 @@ function bytes(value: number) {
   if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KiB`;
   if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
   return `${(value / 1024 ** 3).toFixed(1)} GiB`;
+}
+function downloadConfig(content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a'); link.href = url; link.download = 'disconnected-content.repo'; link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function Timestamp({ value }: { value: string }) {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return <span>Not recorded</span>;
@@ -146,6 +154,9 @@ function App() {
   const [sourcePath, setSourcePath] = useState('');
   const [sourceDirty, setSourceDirty] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [publicUrl, setPublicUrl] = useState('');
+  const [publicDirty, setPublicDirty] = useState(false);
+  const [publishSnapshot, setPublishSnapshot] = useState('');
   const [log, setLog] = useState<{ id: string; text: string }>();
   const [ready, setReady] = useState(false);
   const refresh = async () => {
@@ -156,6 +167,9 @@ function App() {
   useEffect(() => {
     if (!sourceDirty && state?.import_source) setSourcePath(state.import_source.path);
   }, [state?.import_source?.path, sourceDirty]);
+  useEffect(() => {
+    if (!publicDirty && state?.publication) setPublicUrl(state.publication.base_url || `http://${window.location.hostname}`);
+  }, [state?.publication?.base_url, publicDirty]);
   useEffect(() => {
     let mounted = true;
     let inFlight = false;
@@ -205,7 +219,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.4.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.5.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -216,6 +230,7 @@ function App() {
         <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
         {!disconnected && <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />}
         {disconnected && <Tab eventKey="incoming" title={<TabTitleText>Incoming bundles</TabTitleText>} />}
+        {disconnected && <Tab eventKey="publish" title={<TabTitleText>Publish &amp; clients</TabTitleText>} />}
         <Tab eventKey="snapshots" title={<TabTitleText>Snapshots <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
         <Tab eventKey="jobs" title={<TabTitleText>Jobs &amp; evidence</TabTitleText>} />
       </Tabs>
@@ -228,7 +243,7 @@ function App() {
               {disconnected ? state.incoming.length : `${state.profile.repositories.length} ${state.profile.repositories.length === 1 ? 'repository' : 'repositories'}`}</div>
               <p>{disconnected ? 'Archives staged locally for verification and import' : `${state.profile.max_gib} GiB maximum declared RPM content per snapshot`}</p></CardBody></Card>
             <Card><CardTitle>Validated snapshots</CardTitle><CardBody><div className="dc-metric">{state.snapshots.length}</div>
-              <p>Only completed, verified snapshots can be exported</p></CardBody></Card>
+              <p>{disconnected ? 'Verified content ready for local use or HTTP publication' : 'Only completed, verified snapshots can be exported'}</p></CardBody></Card>
           </div>
           <Card><CardTitle>{active ? 'Current operation' : 'Ready for the next transfer'}</CardTitle><CardBody>
             {active ? <div className="dc-current"><Spinner size="md" /><div><strong>{active.operation}</strong><p>{active.stage}</p>
@@ -248,7 +263,7 @@ function App() {
             <p className="dc-muted">A new size preflight is performed for every sync. Metadata refresh may use additional cache space.</p>
           </CardBody></Card>}
           <Alert variant="info" isInline title={disconnected ? 'Disconnected import prototype' : 'Connected sync prototype'}>
-            <p>Transfer bundles carry checksums, without a cryptographic signature. Imported repositories are available locally; HTTP publication and fleet patching are future capabilities.</p>
+            <p>Transfer bundles carry checksums, without a cryptographic signature. {disconnected ? 'Use Publish & clients to serve validated snapshots and obtain client configuration. Client configuration and updates are explicit administrator actions.' : 'Transfer a verified bundle to a disconnected host for import and publication.'}</p>
           </Alert>
         </>}
         {tab === 'incoming' && disconnected && <>
@@ -305,9 +320,57 @@ function App() {
             <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('preflight'); }}>Save &amp; check size</Button>
             <Button variant="secondary" isDisabled={disabled || !selected.length} onClick={() => { void start('sync'); }}>Save &amp; sync snapshot</Button></div>
         </CardBody></Card>}
+        {tab === 'publish' && disconnected && <>
+          <Card><CardTitle>Web server settings</CardTitle><CardBody>
+            <p>Publish validated content through this host's Apache web server. Enter the server URL that client hosts can reach inside the air gap.</p>
+            {!state.publication?.installed && <Alert variant="info" isInline title="Publisher package required">
+              <p>Install <code>cockpit-disconnected-content-publisher</code> and its Apache dependencies before isolation or from an offline bootstrap repository.</p></Alert>}
+            <div className="dc-source-controls"><label htmlFor="public-url">Public server URL</label>
+              <TextInput id="public-url" value={publicUrl} placeholder="http://mirror.example.org" isDisabled={disabled}
+                onChange={(_, value) => { setPublicUrl(value); setPublicDirty(true); }} />
+              <div className="dc-actions"><Button isDisabled={disabled || !publicUrl.trim()} onClick={() => { void act(async () => {
+                await call(['save-publication-settings'], { base_url: publicUrl }); setPublicDirty(false);
+              }, 'Publication settings saved'); }}>Save server URL</Button>
+              {publicDirty && <Label color="orange">Unsaved URL changes</Label>}
+              <Label color={state.publication?.server_active ? 'green' : 'grey'}>{state.publication?.server_active ? 'Apache running' : 'Apache not running'}</Label></div>
+            </div>
+            <p className="dc-muted">Publishing enables and starts Apache. The supplied configuration serves HTTP on port 80. Allow inbound HTTP from approved client networks using your firewall policy. HTTPS requires separately configured TLS; saving an HTTPS URL does not enable TLS.</p>
+          </CardBody></Card>
+          <Card><CardTitle>Publish a validated snapshot</CardTitle><CardBody>
+            <p>Publication creates and verifies a separate public copy. Existing snapshot URLs remain available when newer content is published.</p>
+            <label htmlFor="publish-snapshot">Snapshot to publish</label>
+            <select id="publish-snapshot" className="dc-snapshot-select" value={publishSnapshot} disabled={disabled}
+              onChange={event => setPublishSnapshot(event.target.value)}>
+              <option value="">Choose a validated snapshot</option>
+              {state.snapshots.map(snapshot => <option key={snapshot.id} value={snapshot.id}>{snapshot.id.slice(0, 8)} · {new Date(snapshot.created).toLocaleString()}</option>)}
+            </select>
+            <div className="dc-actions"><Button isDisabled={disabled || publicDirty || !publishSnapshot || !state.publication?.installed || !state.publication.base_url}
+              onClick={() => { void start('publish', publishSnapshot); }}>Publish snapshot</Button></div>
+          </CardBody></Card>
+          {state.publication?.current ? <Card><CardTitle>Currently published snapshot</CardTitle><CardBody>
+            <p><strong>{state.publication.current.snapshot_id}</strong> · Published <Timestamp value={state.publication.current.published_at} /></p>
+            <p>Public copy verified <Timestamp value={state.publication.current.verified_at} /> · {bytes(state.publication.current.bytes)}</p>
+            <p>Client platform: RHEL {state.publication.current.os.major} · {state.publication.current.os.arch}</p>
+            <p>Latest client configuration: <code>{state.publication.current.config_url}</code></p>
+            <p>Install this file on compatible client hosts as <code>/etc/yum.repos.d/disconnected-content.repo</code>. Each repository URL is pinned to this snapshot. To adopt newly published content, install its new configuration file.</p>
+            <div className="dc-actions"><Button variant="secondary" onClick={() => downloadConfig(state.publication!.current!.client_config)}>Download .repo file</Button>
+              <Button variant="secondary" onClick={() => { void act(() => navigator.clipboard.writeText(state.publication!.current!.client_config), 'Repository configuration copied'); }}>Copy .repo contents</Button></div>
+            <pre className="dc-config" aria-label="Client repository configuration">{state.publication.current.client_config}</pre>
+            <Title headingLevel="h2" size="lg">Configure and check client hosts</Title>
+            <p>Review the downloaded file, install it, then refresh metadata and preview security updates. These commands select only the published repositories. Clients need independently trusted Red Hat RPM keys.</p>
+            <pre className="dc-config" aria-label="Client setup commands">{`curl --fail --output disconnected-content.repo '${state.publication.current.config_url}'
+cat disconnected-content.repo
+sudo install -m 0644 disconnected-content.repo /etc/yum.repos.d/disconnected-content.repo
+sudo dnf --disablerepo='*' --enablerepo='dc-*' makecache --refresh
+sudo dnf --disablerepo='*' --enablerepo='dc-*' updateinfo list security
+sudo dnf --disablerepo='*' --enablerepo='dc-*' upgrade --security --assumeno`}</pre>
+            <p className="dc-muted">The preview does not apply updates. After reviewing the transaction and your maintenance policy, an administrator can run the upgrade without --assumeno. Publication does not configure clients, initiate updates, or reboot hosts.</p>
+          </CardBody></Card> : <Card><CardBody>No snapshot has been published yet. Publish one to generate the client configuration.</CardBody></Card>}
+        </>}
         {tab === 'snapshots' && <>
           {!state.snapshots.length && <Card><CardTitle>No validated snapshots yet</CardTitle><CardBody>{disconnected ? 'Import a transfer bundle to create the first snapshot.' : 'Complete a sync to create the first snapshot.'}</CardBody></Card>}
           {state.snapshots.map(snapshot => <Card key={snapshot.id}><CardTitle><span>Snapshot {snapshot.id.slice(0, 8)}</span> <Label color="green">Validated</Label></CardTitle><CardBody>
+            {state.publication?.current?.snapshot_id === snapshot.id && <Label color="blue">Currently published</Label>}
             <p>{snapshot.imported ? 'Imported' : 'Created'} <Timestamp value={snapshot.created} /> · {bytes(snapshot.package_bytes)} of RPM content</p>
             {snapshot.source_created && <p className="dc-muted">Bundle created on source <Timestamp value={snapshot.source_created} /></p>}
             {snapshot.verified_at && <p className="dc-muted">Content verified <Timestamp value={snapshot.verified_at} /></p>}
@@ -316,6 +379,7 @@ function App() {
               <span className="dc-muted">Advisory metadata: {result.metadata_types.includes('updateinfo') ? 'present' : 'not supplied by this repository'}</span></li>)}</ul>
             {disconnected && <div className="dc-local-repos"><strong>Local repository URLs</strong>
               {Object.keys(snapshot.repositories).map(rid => <code key={rid}>{`file://${state.storage.path}/snapshots/${snapshot.id}/repositories/${rid}`}</code>)}</div>}
+            {disconnected && <div className="dc-actions"><Button variant="secondary" isDisabled={disabled} onClick={() => { setPublishSnapshot(snapshot.id); setTab('publish'); }}>Publish over HTTP</Button></div>}
             {!disconnected && <div className="dc-actions"><Button isDisabled={disabled} onClick={() => { void start('export', snapshot.id); }}>Build transfer bundle</Button>
               <Button variant="secondary" isDisabled={disabled} onClick={() => { void start('verify-export', snapshot.id); }}>Verify existing bundle</Button></div>}
           </CardBody></Card>)}
@@ -332,8 +396,10 @@ function App() {
               {job.started && <div><dt>{job.finished ? 'Duration' : 'Elapsed'}</dt><dd>{duration(job)}</dd></div>}</dl>
             <p className="dc-muted">Job {job.id}</p>
             {job.bundle_name && <p>Source bundle: <code>{job.incoming_dir ? `${job.incoming_dir}/` : ''}{job.bundle_name}</code></p>}
-            {job.result?.verified_at && <p>Evidence verified <Timestamp value={job.result.verified_at} /> · {job.result.files_verified} archive files checked</p>}
+            {job.result?.verified_at && <p>{job.operation === 'publish' ? 'Public copy verified' : 'Evidence verified'} <Timestamp value={job.result.verified_at} />
+              {job.result.files_verified !== undefined && <> · {job.result.files_verified} archive files checked</>}</p>}
             {job.result?.checked_at && <p>Archive matched existing snapshot <Timestamp value={job.result.checked_at} /></p>}
+            {job.result?.published_at && <p>Published <Timestamp value={job.result.published_at} /> · Client configuration: <code>{job.result.config_url}</code></p>}
             {job.result?.source_archive_sha256 && <div className="dc-export"><strong>Imported archive SHA-256</strong><code>{job.result.source_archive_sha256}</code></div>}
             {job.plan && <p>{job.plan.packages.toLocaleString()} packages · {bytes(job.plan.package_bytes)} declared content</p>}
             {job.result?.path && <div className="dc-export"><strong>Transfer bundle</strong><code>{job.result.path}</code>

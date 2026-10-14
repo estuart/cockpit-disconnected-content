@@ -4,6 +4,13 @@
   their own validation before being advertised as supported.
 - Connected sync/export and disconnected import roles are implemented. The
   application does not provision VMs or change network isolation policies.
+- HTTP publication requires the optional publisher package and a separately
+  permitted inbound network path. Default HTTP has no transport encryption or
+  web-client authentication. TLS, client certificate policy, and server access
+  controls require administrator configuration.
+- Clients are pinned to published snapshots and must receive a new `.repo` file
+  to advance. Publishing does not initiate remote updates or Ansible jobs. A
+  public copy consumes additional space; retention and deletion remain manual.
 - The profile mirrors existing repositories using the host's existing release and
   entitlement configuration. Cross-major mirroring, EUS selection, architectures,
   and release-policy management are not implemented.

@@ -21,9 +21,11 @@ RHEL sync host and the disconnected role on a separate RHEL system.
   job lifecycle times, elapsed duration, and timestamped verification evidence.
 - A host directory picker with folder navigation, breadcrumbs, filtering, and
   shortcuts to mounted filesystems and common transfer locations.
+- Optional Apache publication with separately verified public copies, immutable
+  snapshot URLs, and generated client `.repo` files and setup commands.
 
-HTTP publication, incremental transfers, signed bundle manifests, and fleet
-patching are not implemented. This is an independently maintained prototype;
+Incremental transfers, signed bundle manifests, and remote fleet patching are
+not implemented. This is an independently maintained prototype;
 the extension does not acquire a Red Hat product support commitment by running
 inside Cockpit. RHEL subscriptions and access rights remain the operator's responsibility.
 
@@ -140,7 +142,7 @@ safe paths, file checksums, RHEL major version, architecture, repository metadat
 and trusted RPM signatures. Archive ownership, modes, links, special files, sparse
 files, duplicate members, and unexpected paths are not accepted or applied.
 An identical bundle can be imported again without duplicating or replacing its
-snapshot. HTTP serving and client promotion are separate future features.
+snapshot. Publishing and client rollout are explicit subsequent steps.
 
 The source directory is separate from managed snapshot storage. The GUI saves
 only `incoming_dir` and its settings timestamp in the root-owned configuration;
@@ -158,6 +160,48 @@ record when the archive matched the existing snapshot. Imported snapshots also
 show their import time and source bundle creation time. Dates include the
 browser's local timezone; hovering a timestamp reveals its original ISO value.
 Older records retain the evidence they actually captured without invented dates.
+
+## Publish and configure client hosts
+
+Install the optional `cockpit-disconnected-content-publisher` RPM and its Apache
+dependencies on the disconnected host before isolation or from an offline
+bootstrap repository. Connected sync hosts do not need this subpackage.
+
+1. Open **Publish & clients**, enter the server URL clients can reach, such as
+   `http://mirror.example.org`, and select **Save server URL**.
+2. Select an imported, validated snapshot and choose **Publish snapshot**. This
+   creates a separate copy of indexed repository metadata and RPMs under
+   `/var/www/disconnected-content/public/snapshots/<snapshot-id>/`, verifies it,
+   applies SELinux labels, checks Apache configuration, and starts the server.
+3. Permit inbound TCP port 80 from approved client networks through your firewall
+   policy. Publication does not modify firewall rules or network isolation.
+4. Download the displayed `.repo` file and install it on compatible client hosts
+   as `/etc/yum.repos.d/disconnected-content.repo`. Review the displayed setup
+   commands to refresh metadata, inspect security advisories, and preview updates.
+
+The GUI shows the current publication and timestamp, complete configuration, and
+client commands. Package GPG checks stay enabled, with keys provisioned and
+trusted independently on clients. Original repository metadata is not signed by
+this prototype (`repo_gpgcheck=0`). The default Apache setup provides HTTP; HTTPS
+and certificate trust require separately configured TLS. Entering an HTTPS URL
+does not configure the server's TLS listener.
+
+Every generated repository URL pins a specific published snapshot. Publishing
+new content updates `/disconnected-content/client.repo`, while older snapshot
+URLs remain usable. Existing clients advance only when an administrator installs
+the newer configuration. This avoids changing repository content during an
+in-progress package transaction. Switching repositories does not undo installed
+updates. HTTP content is readable by hosts allowed through the network policy;
+web-client authentication is not included in the initial publisher.
+
+Publication copies repository content rather than exposing private engine state.
+It requires additional storage for the public copy; the reserve is checked on
+the publication filesystem. Logs, jobs, inbox archives, snapshot state files, and
+unindexed files are excluded. Private staging is outside the Apache alias.
+
+Remote Ansible execution remains a design discussion. See
+[client automation options](docs/automation-options.md) for suggested repository
+configuration and update workflows.
 
 ## Development and publication hygiene
 

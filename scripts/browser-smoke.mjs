@@ -112,6 +112,46 @@ try {
     console.log('GUI rejected an invalid source, saved and scanned the selected directory, persisted it across reload, and displayed bundle timestamps');
   }
   await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+  if (process.argv.includes('--run-publish')) {
+    const origin = process.env.COCKPIT_TEST_PUBLIC_URL;
+    if (!disconnected || !origin) throw new Error('Publication check requires the disconnected role and COCKPIT_TEST_PUBLIC_URL');
+    const status = () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
+    const before = await status();
+    if (!before.snapshots.length) throw new Error('Import a validated snapshot before the publication test');
+    const previous = before.jobs.map(job => job.id);
+    const snapshot = before.snapshots[0];
+    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    await app.getByRole('textbox', { name: 'Public server URL', exact: true }).fill(origin);
+    await app.getByRole('button', { name: 'Save server URL', exact: true }).click();
+    await expect.poll(async () => (await status()).publication.base_url).toBe(origin);
+    await app.getByLabel('Snapshot to publish', { exact: true }).selectOption(snapshot.id);
+    await app.getByRole('button', { name: 'Publish snapshot', exact: true }).click();
+    await expect.poll(async () => (await status()).jobs.find(job => job.operation === 'publish' && !previous.includes(job.id))?.status,
+      { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    const config = app.getByLabel('Client repository configuration', { exact: true });
+    await expect(config).toContainText(`baseurl=${origin}/disconnected-content/snapshots/${snapshot.id}/`);
+    await expect(config).toContainText('gpgcheck=1');
+    await expect(app.getByText('Apache running', { exact: true })).toBeVisible();
+    await expect(app.getByLabel('Client setup commands', { exact: true })).toContainText('upgrade --security --assumeno');
+    const downloadEvent = page.waitForEvent('download');
+    await app.getByRole('button', { name: 'Download .repo file', exact: true }).click();
+    const download = await downloadEvent;
+    await download.saveAs('.local/browser-client.repo');
+    expect(download.suggestedFilename()).toBe('disconnected-content.repo');
+    const configUrl = `${origin}/disconnected-content/client.repo`;
+    const response = await fetch(configUrl);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(await config.textContent());
+    expect((await fetch(configUrl, { method: 'HEAD' })).status).toBe(200);
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      expect([403, 405]).toContain((await fetch(configUrl, { method })).status);
+    }
+    await page.screenshot({ path: '.local/cockpit-publication.png', fullPage: true });
+    console.log('Browser-started publication, pinned client configuration, download, setup commands, and active Apache status passed');
+    await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+  }
   if (process.argv.includes('--run-import')) {
     if (!disconnected) throw new Error('Import browser check requires the disconnected role');
     const bundle = process.env.COCKPIT_TEST_BUNDLE;

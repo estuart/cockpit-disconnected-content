@@ -5,7 +5,9 @@ helper. Each call uses an argument array and requires administrative access.
 The helper reads a root-owned configuration file at a fixed path. An administrator
 can save only a local import source directory through the GUI; destination
 storage and trust policy remain in administrator-managed configuration. Browser
-requests cannot choose an executable or arbitrary URL.
+requests cannot choose an executable or a download-source URL. Publication
+settings accept a validated HTTP(S) origin used in generated client files; the
+helper does not connect to that origin.
 
 The disconnected role also exposes an administrator-only directory browser. It
 returns at most 500 immediate real subdirectories, a parent path, and shortcuts
@@ -46,8 +48,30 @@ No tar extraction API is used to apply archive paths, ownership, permissions, or
 links. Archive members are written explicitly with restrictive local permissions.
 
 Unsigned imports require explicit administrator configuration. A provisioned
-manifest signing policy remains future work. Immutable HTTP publication and
-promotion of clients are separate future capabilities.
+manifest signing policy remains future work.
+
+## HTTP publication
+
+The optional publisher subpackage installs a fixed Apache alias for
+`/var/www/disconnected-content/public/`. The engine's private state remains
+outside the document tree. Listings, symlink following, content handlers,
+overrides, and methods other than GET/HEAD are disabled for this alias.
+
+Publishing is a systemd job restricted to the disconnected role and a validated
+snapshot. The queue captures the client-facing origin. Only files indexed by
+repomd.xml and primary metadata are copied to private staging on the publication
+filesystem. The publisher independently revalidates both source and copy,
+including RPM signatures, applies web-content SELinux labels, and checks/starts
+Apache before an atomic rename exposes a complete snapshot directory.
+
+An atomic file replacement updates the downloadable client configuration after
+the snapshot is available. Its URLs pin that immutable snapshot. Private records
+capture each publication and the most recent publication. A process failure
+between replacing the client file and recording private history can leave the
+download ahead of the GUI record; republishing repairs that bookkeeping without
+replacing repository content. Earlier snapshots are retained. Publication does
+not change firewall policy, configure clients, run remote jobs, or roll back
+installed packages.
 
 ## Transfer format v1 (experimental)
 

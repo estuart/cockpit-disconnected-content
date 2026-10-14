@@ -25,11 +25,14 @@ import tarfile
 import tempfile
 import time
 import uuid
+from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
+PUBLISH_ROOT = Path("/var/www/disconnected-content")
+PUBLISH_CONF = Path("/etc/httpd/conf.d/disconnected-content.conf")
 HELPER = "/usr/libexec/disconnected-content"
 GIB = 1024 ** 3
 ID = re.compile(r"^[a-f0-9]{32}$")
@@ -152,8 +155,9 @@ def metadata_stream(path):
         raise ValueError(f"Unsupported primary metadata compression: {path.suffix}")
 
 
-def validate_repository(root, require_updateinfo=False, check_signatures=True):
-    root = Path(root)
+def validate_repository(root, require_updateinfo=False, check_signatures=True, include_files=False):
+    root = Path(root).resolve()
+    files = {"repodata/repomd.xml"}
     repomd = safe_path(root, "repodata/repomd.xml")
     if repomd.stat().st_size > 16 * 1024 * 1024:
         raise ValueError("Repository index is too large")
@@ -167,6 +171,7 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True):
         if location is None or checksum is None or not checksum.text:
             raise ValueError("Incomplete metadata index")
         path = safe_path(root, location.attrib["href"])
+        files.add(path.relative_to(root).as_posix())
         if digest(path, checksum.attrib["type"]) != checksum.text.strip():
             raise ValueError(f"Metadata checksum mismatch: {kind}")
         metadata_types.append(kind)
@@ -194,6 +199,7 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True):
             count += 1
             total += path.stat().st_size
             package_paths.append(str(path))
+            files.add(path.relative_to(root).as_posix())
             element.clear()
     if not count:
         raise ValueError("Repository contains no RPM packages")
@@ -206,8 +212,46 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True):
             if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
                     line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
                 raise ValueError("RPM signature validation failed or signing key is not trusted")
-    return {"packages": count, "package_bytes": total, "metadata_types": sorted(metadata_types),
-            "rpm_signatures_verified": check_signatures}
+    result = {"packages": count, "package_bytes": total, "metadata_types": sorted(metadata_types),
+              "rpm_signatures_verified": check_signatures}
+    if include_files:
+        result["files"] = sorted(files)
+    return result
+
+
+def public_origin(value):
+    if not isinstance(value, str) or len(value) > 1024 or any(c.isspace() for c in value):
+        raise ValueError("Enter an HTTP or HTTPS server URL without credentials, a path, or whitespace")
+    try:
+        url = urlsplit(value)
+        port = url.port
+    except ValueError as error:
+        raise ValueError("Invalid server URL or port") from error
+    if (url.scheme not in {"http", "https"} or not url.hostname or url.username is not None
+            or url.password is not None or url.path not in {"", "/"} or url.query or url.fragment
+            or not re.fullmatch(r"[A-Za-z0-9.:[\]-]+", url.netloc)
+            or port is not None and not 1 <= port <= 65535):
+        raise ValueError("Enter an HTTP or HTTPS server URL without credentials, a path, or whitespace")
+    return urlunsplit((url.scheme, url.netloc, "", "", ""))
+
+
+def client_repo_config(origin, snapshot):
+    origin = public_origin(origin)
+    sid = snapshot["id"]
+    if not isinstance(sid, str) or not ID.fullmatch(sid):
+        raise ValueError("Invalid snapshot identifier")
+    lines = ["# Disconnected Content: pinned to validated snapshot " + sid,
+             "# Install on compatible RHEL clients as /etc/yum.repos.d/disconnected-content.repo",
+             "# Trust RPM signing keys independently; this file does not enroll keys.", ""]
+    for rid in sorted(snapshot["repositories"]):
+        if not REPO_ID.fullmatch(rid):
+            raise ValueError("Invalid repository identifier")
+        lines.extend([f"[dc-{rid}]", f"name=Disconnected Content - {rid}",
+                      f"baseurl={origin}/disconnected-content/snapshots/{sid}/repositories/{quote(rid, safe='')}/",
+                      "enabled=1", "gpgcheck=1", "repo_gpgcheck=0", "sslverify=1",
+                      "gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release",
+                      "skip_if_unavailable=0", "metadata_expire=1h", ""])
+    return "\n".join(lines)
 
 
 def bundle_manifest(archive, max_bytes, max_files):
@@ -314,6 +358,117 @@ class Engine:
     def profile(self):
         path = self.root / "profile.json"
         return read_json(path) if path.exists() else {"repositories": [], "max_gib": 20}
+
+    def publication_status(self):
+        installed = PUBLISH_CONF.is_file() and not PUBLISH_CONF.is_symlink()
+        active = False
+        if installed:
+            active = subprocess.run(["/usr/bin/systemctl", "is-active", "--quiet", "httpd"],
+                                    check=False, capture_output=True).returncode == 0
+        path = self.root / "publication.json"
+        return {"installed": installed, "server_active": active,
+                "base_url": self.config.get("public_base_url", ""),
+                "current": read_json(path) if path.exists() else None}
+
+    def save_publication_settings(self, data):
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Publication requires the disconnected installation role")
+        if not isinstance(data, dict) or set(data) != {"base_url"}:
+            raise ValueError("Specify only the public server URL")
+        origin = public_origin(data["base_url"])
+        with self.lock():
+            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+                raise ValueError("Wait for the active job before changing publication settings")
+            config = read_json(CONFIG)
+            config["public_base_url"] = origin
+            write_json(CONFIG, config)
+            self.config = config
+        return {"base_url": origin}
+
+    def publish(self, job):
+        if self.config.get("role") != "disconnected" or not self.publication_status()["installed"]:
+            raise ValueError("Install the publisher package on a disconnected host before publishing")
+        sid = job["snapshot_id"]
+        if not isinstance(sid, str) or not ID.fullmatch(sid):
+            raise ValueError("Select a validated snapshot")
+        source = safe_path(self.root / "snapshots", sid)
+        snapshot = read_json(safe_path(source, "snapshot.json"))
+        if snapshot.get("status") != "validated" or snapshot.get("id") != sid:
+            raise ValueError("Only validated snapshots can be published")
+        origin = public_origin(job["public_base_url"])
+        config = client_repo_config(origin, snapshot)
+        PUBLISH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o755)
+        public = PUBLISH_ROOT / "public"
+        for path in [PUBLISH_ROOT, public, public / "snapshots"]:
+            if path.is_symlink():
+                raise ValueError("Publication storage must not contain symlinks")
+            path.mkdir(exist_ok=True, mode=0o755)
+            os.chmod(path, 0o755)
+        private = PUBLISH_ROOT / ".staging"
+        private.mkdir(exist_ok=True, mode=0o700)
+        if private.is_symlink():
+            raise ValueError("Publication staging must not be a symlink")
+        staging = private / job["id"]
+        staging.mkdir(mode=0o700)
+        destination = safe_path(public / "snapshots", sid)
+        try:
+            self.update(job, stage="Revalidating source repositories and trusted RPM signatures")
+            inventory = {}
+            for rid in snapshot["repositories"]:
+                repository = safe_path(source, f"repositories/{rid}")
+                checked = validate_repository(repository, require_updateinfo=("baseos" in rid or "appstream" in rid),
+                                              include_files=True)
+                inventory[rid] = checked["files"]
+            total = sum(safe_path(source, f"repositories/{rid}/{name}").stat().st_size
+                        for rid, names in inventory.items() for name in names)
+            if shutil.disk_usage(PUBLISH_ROOT).free < total + self.floor:
+                raise ValueError("Not enough free space for a public copy and the storage reserve")
+            self.update(job, stage="Copying indexed repository content to private publication staging")
+            for rid, names in inventory.items():
+                for name in names:
+                    original = safe_path(source, f"repositories/{rid}/{name}")
+                    if shutil.disk_usage(PUBLISH_ROOT).free < original.stat().st_size + self.floor:
+                        raise ValueError("Storage reserve reached while publishing")
+                    target = safe_path(staging, f"repositories/{rid}/{name}")
+                    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    shutil.copyfile(original, target)
+                    os.chmod(target, 0o644)
+            self.update(job, stage="Verifying the public copy before exposing repository URLs")
+            checked = {}
+            for rid in inventory:
+                checked[rid] = validate_repository(staging / "repositories" / rid,
+                                                  require_updateinfo=("baseos" in rid or "appstream" in rid))
+            if destination.exists():
+                for rid in inventory:
+                    validate_repository(destination / "repositories" / rid,
+                                        require_updateinfo=("baseos" in rid or "appstream" in rid))
+                    if digest(destination / "repositories" / rid / "repodata/repomd.xml") != digest(
+                            staging / "repositories" / rid / "repodata/repomd.xml"):
+                        raise ValueError("Different public content already uses this snapshot identifier")
+            verified_at = now()
+            for directory, _, _ in os.walk(staging):
+                os.chmod(directory, 0o755)
+            repo_file = private / f"{job['id']}.repo"
+            repo_file.write_text(config)
+            os.chmod(repo_file, 0o644)
+            self.run_command(["/usr/sbin/restorecon", "-RF", str(PUBLISH_ROOT)], job, "Applying web-content SELinux labels")
+            self.run_command(["/usr/sbin/httpd", "-t"], job, "Checking Apache configuration")
+            self.run_command(["/usr/bin/systemctl", "enable", "httpd"], job, "Enabling the HTTP publisher")
+            self.run_command(["/usr/bin/systemctl", "reload-or-restart", "httpd"], job, "Starting the HTTP publisher")
+            if not destination.exists():
+                os.rename(staging, destination)
+            os.replace(repo_file, public / "client.repo")
+            record = {"snapshot_id": sid, "published_at": now(), "verified_at": verified_at,
+                      "base_url": origin, "config_url": f"{origin}/disconnected-content/client.repo",
+                      "client_config": config, "repositories": checked, "bytes": total,
+                      "os": snapshot["os"], "job_id": job["id"]}
+            write_json(self.root / "publications" / f"{job['id']}.json", record)
+            write_json(self.root / "publication.json", record)
+            self.update(job, result=record)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+            (private / f"{job['id']}.repo").unlink(missing_ok=True)
 
     def incoming_directory(self, value=None):
         value = value if value is not None else self.config.get("incoming_dir", str(self.root / "incoming"))
@@ -451,7 +606,8 @@ class Engine:
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
                 "incoming": incoming, "import_source": source,
-                "capabilities": {"import": self.config.get("role") == "disconnected", "publish": False,
+                "publication": self.publication_status() if self.config.get("role") == "disconnected" else None,
+                "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
 
     def scan_incoming(self):
@@ -492,11 +648,11 @@ class Engine:
         return path
 
     def start(self, operation, snapshot_id=None):
-        if operation not in {"preflight", "sync", "export", "verify-export", "import"}:
+        if operation not in {"preflight", "sync", "export", "verify-export", "import", "publish"}:
             raise ValueError("Unknown operation")
-        if operation == "import":
+        if operation in {"import", "publish"}:
             if self.config.get("role") != "disconnected":
-                raise ValueError("Import requires the disconnected installation role")
+                raise ValueError("Import and publication require the disconnected installation role")
         elif self.config.get("role") != "connected":
             raise ValueError("This installation does not permit connected operations")
         with self.lock():
@@ -509,18 +665,24 @@ class Engine:
             profile = self.profile()
             if operation in {"preflight", "sync"}:
                 self.save_profile_unlocked_validate(profile)
-            if operation in {"export", "verify-export"}:
+            if operation in {"export", "verify-export", "publish"}:
                 if not snapshot_id or not ID.fullmatch(snapshot_id):
                     raise ValueError("Select a validated snapshot")
                 snapshot = read_json(self.root / "snapshots" / snapshot_id / "snapshot.json")
                 if snapshot["status"] != "validated":
                     raise ValueError("Only validated snapshots can be exported")
+            if operation == "publish":
+                if not self.publication_status()["installed"]:
+                    raise ValueError("Install cockpit-disconnected-content-publisher before publishing")
+                origin = public_origin(self.config.get("public_base_url"))
             jid = uuid.uuid4().hex
             job = {"id": jid, "operation": operation, "status": "queued", "stage": "Waiting for worker",
                    "created": now(), "updated": now(), "profile": profile, "snapshot_id": snapshot_id if operation != "import" else None}
             if operation == "import":
                 job["bundle_name"] = snapshot_id
                 job["incoming_dir"] = str(source)
+            elif operation == "publish":
+                job["public_base_url"] = origin
             write_json(self.job_path(jid), job)
             started = subprocess.run(["/usr/bin/systemctl", "start", "--no-block", self.unit(jid)],
                                      capture_output=True, text=True, check=False)
@@ -742,6 +904,8 @@ class Engine:
                 self.update(job, stage="Verifying exported archive", result=verify_archive(path))
             elif job["operation"] == "import":
                 self.import_bundle(job)
+            elif job["operation"] == "publish":
+                self.publish(job)
             self.update(job, status="succeeded", stage="Completed", finished=now())
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, InterruptedError)):
@@ -763,7 +927,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -775,7 +939,7 @@ def main():
     engine = Engine()
     if args.command == "status":
         result = engine.status()
-    elif args.command in {"save-profile", "save-import-settings", "browse-directories"}:
+    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories"}:
         raw = sys.stdin.read(16385)
         if len(raw) > 16384:
             raise ValueError("Request is too large")
@@ -784,6 +948,8 @@ def main():
             result = engine.save_profile(data)
         elif args.command == "save-import-settings":
             result = engine.save_import_settings(data)
+        elif args.command == "save-publication-settings":
+            result = engine.save_publication_settings(data)
         else:
             result = engine.browse_directories(data)
     elif args.command == "start":

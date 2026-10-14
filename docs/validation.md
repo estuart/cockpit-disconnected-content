@@ -142,3 +142,40 @@ Version 0.4.0 adds a directory picker to the disconnected transfer inbox.
 This validates browsing a mounted read-only filesystem, not physical USB device
 detection, mounting, or hot-unplug behavior. Mounting transfer media remains an
 administrator task. Browser artifacts and host-specific details are local-only.
+
+## HTTP publication and isolated client consumption
+
+Version 0.5.0 adds an optional Apache publisher and generated client configuration.
+
+- All 60 backend tests pass, together with TypeScript checking and the production
+  build. Publication tests cover role/package prerequisites, pinned URLs and
+  package trust checks, settings validation, source/copy verification, indexed
+  content only, copy tampering, storage failure, server failure, cleanup,
+  preservation of existing publications, and reuse without replacing public data.
+- Built a main RPM and optional publisher RPM. Prepared Apache dependencies on
+  the connected build host, checked dependency signatures on both hosts, and
+  installed from a transferred file repository while outbound access stayed blocked.
+- Published the imported 146-RPM repository through Cockpit. Verified server
+  status, current-publication timestamps, pinned client configuration, setup
+  commands, and the browser's `.repo` download. SELinux remained enforcing.
+- Created a separate network namespace and RPM installroot for the client test.
+  It had no default route and could reach the publisher through a specific route.
+  It downloaded the exact generated configuration over HTTP, with `gpgcheck=1`
+  and independently provisioned Red Hat RPM keys.
+- Using only the HTTP repository, installed `pacemaker-doc-3.0.0-5.el10.noarch`,
+  observed `RHSA-2026:40833`, and applied its security update to
+  `pacemaker-doc-3.0.1-5.el10_2.1.noarch`. The publisher's own package state was
+  not used as the client installroot.
+- Confirmed private job/inbox/staging/state paths were denied over HTTP and
+  directory listings were disabled. GET/HEAD downloads succeeded while POST,
+  PUT, and DELETE requests were denied. The client could not reach the internet
+  before or after the transaction.
+- Removed the temporary client namespace, link, and its runtime-only firewall
+  allowance. HTTP remains permitted from the approved internal client network;
+  outbound isolation is preserved. Temporary browser access was removed.
+
+This validates a network-isolated installroot client, not a second complete
+client VM or full BaseOS/AppStream patching. TLS, HTTP client authentication,
+client rollout automation, reboot policy, cross-repository dependency closure,
+and production-scale retention remain further work. Public repository content
+and the current client configuration remain available for inspection.
