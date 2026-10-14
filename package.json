@@ -1,0 +1,24 @@
+{
+  "name": "cockpit-disconnected-content",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Cockpit extension for disconnected RPM repository workflows",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "dependencies": {
+    "@patternfly/patternfly": "6.1.0",
+    "@patternfly/react-core": "6.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.13",
+    "@types/react-dom": "18.3.1",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "@playwright/test": "1.58.2"
+  }
+}

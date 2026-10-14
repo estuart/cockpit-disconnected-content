@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+*.rpm
+*.tar
+*.tar.gz
+*.iso
+*.sha256
+__pycache__/
+.venv/
+.env*
+!.env.example
+.local/
+playwright-report/
+test-results/
+*.log
+.DS_Store
