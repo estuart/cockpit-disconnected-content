@@ -28,7 +28,7 @@ import uuid
 from urllib.parse import quote, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -469,7 +469,7 @@ class Engine:
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports", "export-records", "incoming", ".imports"):
+        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
 
     @contextlib.contextmanager
@@ -494,9 +494,34 @@ class Engine:
             active = subprocess.run(["/usr/bin/systemctl", "is-active", "--quiet", "httpd"],
                                     check=False, capture_output=True).returncode == 0
         path = self.root / "publication.json"
+        current = read_json(path) if path.exists() else None
         return {"installed": installed, "server_active": active,
                 "base_url": self.config.get("public_base_url", ""),
-                "current": read_json(path) if path.exists() else None}
+                "current": current, "availability": self.publication_availability(current)}
+
+    def publication_availability(self, current):
+        """Cheap local availability checks; not a new package verification or HTTP probe."""
+        if not current:
+            return {"state": "not_published", "reason": "No publication has been recorded"}
+        try:
+            sid = current["snapshot_id"]
+            if not ID.fullmatch(sid) or not current.get("repositories"):
+                raise ValueError("Publication record is incomplete")
+            public = PUBLISH_ROOT / "public"
+            if PUBLISH_ROOT.is_symlink() or public.is_symlink():
+                raise ValueError("Public content directory must not be a symlink")
+            config = safe_path(public, "client.repo")
+            if not config.is_file() or config.stat().st_size > 1024 * 1024 or config.read_text() != current["client_config"]:
+                raise ValueError("Public client configuration is missing or differs from the publication record")
+            for rid in current["repositories"]:
+                if not REPO_ID.fullmatch(rid):
+                    raise ValueError("Publication record has an invalid repository ID")
+                index = safe_path(public, f"snapshots/{sid}/repositories/{rid}/repodata/repomd.xml")
+                if not index.is_file():
+                    raise ValueError("A public repository index is missing")
+            return {"state": "available", "reason": "Public repository indexes and client configuration are present"}
+        except (OSError, ValueError, KeyError, UnicodeError) as error:
+            return {"state": "unavailable", "reason": str(error)}
 
     def client_automation(self, publication_id):
         if self.config.get("role") != "disconnected":
@@ -849,18 +874,103 @@ class Engine:
                 "selection_changed": bool(latest and set(latest["repositories"]) != selection),
                 "selected_repositories": selected, "plan_job": plan_job}
 
+    def disconnected_status(self, snapshots, jobs, source, incoming, publication):
+        imported = sorted((s for s in snapshots if s.get("imported") and s["status"] == "validated"),
+                          key=lambda s: s["created"], reverse=True)
+        latest = imported[0] if imported else None
+        by_checksum = {s["source_archive_sha256"]: s for s in imported if s.get("source_archive_sha256")}
+        evidence = {}
+        for path in (self.root / "import-records").glob("*.json"):
+            record = read_json(path)
+            key = (record["source_path"], record["source_archive_sha256"])
+            if key not in evidence or record["checked_at"] > evidence[key]["checked_at"]:
+                evidence[key] = record
+        for bundle in incoming:
+            bundle.update(state="awaiting_import", reason="Checksum present; archive still needs validation", snapshot_id=None)
+            path = Path(source["path"]) / bundle["name"]
+            try:
+                checksum = self.expected_archive_checksum(path)
+                snapshot = by_checksum.get(checksum)
+                if snapshot:
+                    bundle["snapshot_id"] = snapshot["id"]
+                    record = evidence.get((str(path), checksum))
+                    if record and record.get("fingerprint") == self.fingerprint(path):
+                        bundle.update(state="imported", reason="Imported content recorded; source file attributes are unchanged")
+                    elif record:
+                        bundle.update(state="changed", reason="Source archive changed since its last import check; validate it again")
+                    else:
+                        bundle.update(state="known", reason="Checksum identifies previously imported content; this source file has not been rechecked")
+                attempt = next((j for j in jobs if j.get("operation") == "import"
+                                and j.get("bundle_name") == bundle["name"]
+                                and j.get("incoming_dir", str(self.root / "incoming")) == source["path"]), None)
+                if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"}:
+                    bundle.update(state="changed", reason="The last import attempt for this file did not complete successfully; validate it again")
+            except (ValueError, OSError, UnicodeError) as error:
+                bundle.update(state="blocked", reason=str(error))
+        pending = [b for b in incoming if b["state"] in {"awaiting_import", "changed", "blocked"}]
+        current = publication["current"]
+        matches = bool(latest and current and latest["id"] == current["snapshot_id"])
+        url_changed = bool(current and publication["base_url"] != current["base_url"])
+        serving = bool(current and publication["installed"] and publication["server_active"]
+                       and publication["availability"]["state"] == "available")
+        active = next((j for j in jobs if j["status"] in {"queued", "running"}), None)
+        attempt = next((j for j in jobs if j.get("operation") == "publish" or
+                        j.get("operation") == "import" and j.get("incoming_dir", str(self.root / "incoming")) == source["path"]), None)
+        phase, reason = "clients", "Published content and client setup downloads are available. Client application is not confirmed."
+        target = latest["id"] if latest else None
+        if latest and (not matches or url_changed or not serving):
+            phase = "publisher_setup" if not publication["installed"] else "server_url" if not publication["base_url"] else "publish"
+            reason = ("Install the optional publisher package to serve imported content." if phase == "publisher_setup" else
+                      "Save the server URL clients can reach inside the air gap." if phase == "server_url" else
+                      "The saved server URL differs from the recorded publication; review and republish." if url_changed else
+                      "The latest imported snapshot is not the current publication." if not matches else
+                      "Apache is not running; review and republish to restore service." if not publication["server_active"] else
+                      publication["availability"]["reason"] + ". Review and republish to restore the public copy.")
+        elif not latest and not serving or pending:
+            if not source["available"]:
+                phase, reason = "source", "The saved transfer folder is unavailable. Mount the media or choose an existing directory."
+            elif not self.config.get("allow_unsigned_imports"):
+                phase, reason = "import_policy", "Prototype imports are disabled by administrator policy. Review the import requirements."
+            elif incoming:
+                phase, reason = "import", "Review transferred bundles and validate the content you want to import."
+            else:
+                phase, reason = "waiting", "No transfer bundles were found. Stage an archive and its matching checksum in the saved source folder."
+        attention = None
+        if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"}:
+            milestone = max(latest["created"] if latest else "", current["published_at"] if current else "")
+            if attempt.get("finished", attempt["created"]) > milestone:
+                phase, reason, attention = "failed", attempt["stage"], attempt
+                if attempt["operation"] == "publish":
+                    target = attempt.get("snapshot_id")
+        if active:
+            phase, reason, attention = "running", active["stage"], None
+        repository_status = []
+        for rid in sorted({rid for snapshot in imported for rid in snapshot["repositories"]}):
+            snapshot = next(s for s in imported if rid in s["repositories"])
+            repository_status.append({"id": rid, "snapshot_id": snapshot["id"], "imported_at": snapshot["created"],
+                                      "repository": snapshot["repositories"][rid],
+                                      "publication_state": "current" if serving and current["snapshot_id"] == snapshot["id"] else
+                                      "older" if current and rid in current["repositories"] else "not_published"})
+        return {"phase": phase, "reason": reason, "active": active, "attention_job": attention,
+                "latest_import": latest, "publication_matches_latest": matches, "publication_serving": serving,
+                "server_url_changed": url_changed, "target_snapshot_id": target,
+                "pending_bundles": len(pending), "known_bundles": len(incoming) - len(pending),
+                "repositories": repository_status, "client_application": "unconfirmed"}
+
     def status(self):
         jobs = self.jobs()
         snapshots = [read_json(p) for p in (self.root / "snapshots").glob("*/snapshot.json")]
         usage = shutil.disk_usage(self.root)
         source, incoming = self.scan_incoming() if self.config.get("role") == "disconnected" else (None, [])
         connected = self.connected_status(snapshots, jobs) if self.config.get("role") == "connected" else None
+        publication = self.publication_status() if self.config.get("role") == "disconnected" else None
+        disconnected = self.disconnected_status(snapshots, jobs, source, incoming, publication) if publication else None
         return {"version": VERSION, "role": self.config.get("role"), "os": host_os(),
                 "storage": {"path": str(self.root), "free": usage.free, "total": usage.total,
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
                 "incoming": incoming, "import_source": source,
-                "publication": self.publication_status() if self.config.get("role") == "disconnected" else None,
+                "publication": publication, "disconnected": disconnected,
                 "connected": connected,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
@@ -901,6 +1011,24 @@ class Engine:
         if not path.is_file():
             raise ValueError("Transfer archive is missing")
         return path
+
+    @staticmethod
+    def expected_archive_checksum(path):
+        sidecar = safe_path(path.parent, path.name + ".sha256")
+        if not sidecar.is_file():
+            raise ValueError("A regular checksum sidecar is required beside the archive")
+        if sidecar.stat().st_size > 1024:
+            raise ValueError("Checksum sidecar is too large")
+        match = re.fullmatch(r"([a-f0-9]{64}) [ *]" + re.escape(path.name) + r"\n?", sidecar.read_text())
+        if match is None:
+            raise ValueError("Checksum sidecar has an invalid format or archive filename")
+        return match.group(1)
+
+    def record_import_check(self, job, path, snapshot, fingerprint):
+        record = {"snapshot_id": snapshot["id"], "imported_at": snapshot["created"],
+                  "checked_at": now(), "source_path": str(path), "source_archive_sha256": snapshot["source_archive_sha256"],
+                  "fingerprint": fingerprint}
+        write_json(self.root / "import-records" / f"{job['id']}.json", record)
 
     def start(self, operation, snapshot_id=None):
         if operation not in {"preflight", "sync", "export", "verify-export", "import", "publish"}:
@@ -953,18 +1081,14 @@ class Engine:
         if self.config.get("allow_unsigned_imports") is not True:
             raise ValueError("Unsigned imports are disabled; an administrator must explicitly enable prototype imports")
         path = self.bundle_path(job["bundle_name"], job.get("incoming_dir"))
+        source_fingerprint = self.fingerprint(path)
         limit = int(self.config.get("max_import_gib", 200)) * GIB
         if path.stat().st_size > limit + GIB:
             raise ValueError("Transfer archive exceeds the import size limit")
-        sidecar = safe_path(path.parent, path.name + ".sha256")
-        if not sidecar.is_file():
-            raise ValueError("A regular checksum sidecar is required beside the archive")
-        if sidecar.stat().st_size > 1024:
-            raise ValueError("Checksum sidecar is too large")
-        match = re.fullmatch(r"([a-f0-9]{64}) [ *]" + re.escape(path.name) + r"\n?", sidecar.read_text())
+        expected = self.expected_archive_checksum(path)
         self.update(job, stage="Verifying transferred archive against its SHA-256 sidecar")
         checksum = digest(path)
-        if match is None or match.group(1) != checksum:
+        if expected != checksum:
             raise ValueError("Transfer checksum mismatch; archive was not imported")
         with tarfile.open(path, "r|") as archive:
             manifest, total = bundle_manifest(archive, limit, 200000)
@@ -978,6 +1102,9 @@ class Engine:
         if destination.exists():
             existing = read_json(destination / "snapshot.json")
             if existing.get("source_archive_sha256") == checksum:
+                if self.fingerprint(path) != source_fingerprint:
+                    raise ValueError("Source archive changed during verification; scan and validate it again")
+                self.record_import_check(job, path, existing, source_fingerprint)
                 self.update(job, snapshot_id=sid, result={"snapshot_id": sid, "already_imported": True,
                                                         "checked_at": now(), "source_archive_sha256": checksum,
                                                         "authenticated": False})
@@ -1001,8 +1128,11 @@ class Engine:
                         "repositories": checked, "package_bytes": sum(r["package_bytes"] for r in checked.values()),
                         "imported": True, "source_archive_sha256": checksum, "authenticated": False}
             write_json(staging / "snapshot.json", snapshot)
+            if self.fingerprint(path) != source_fingerprint:
+                raise ValueError("Source archive changed during import; scan and validate it again")
             # The snapshot becomes visible only after every validation succeeds.
             os.rename(staging, destination)
+            self.record_import_check(job, path, snapshot, source_fingerprint)
             self.update(job, snapshot_id=sid, result={"snapshot_id": sid, "repositories": checked,
                                                     "source_archive_sha256": checksum, **verified})
         finally:

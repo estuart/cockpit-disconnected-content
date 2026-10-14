@@ -254,3 +254,39 @@ Availability is an inexpensive filesystem change check, not a fresh archive hash
 on every poll. Transfer and disconnected import remain unconfirmed by this host.
 The live UI cycle used an existing small configured repository, not a full
 BaseOS/AppStream mirror or a production-scale performance test.
+
+## Disconnected operations dashboard
+
+Version 0.8.0 adds the disconnected workflow dashboard and a dedicated client
+setup tab.
+
+- All 102 backend tests pass, including 19 new disconnected workflow/availability
+  cases. Browser checks cover ten connected and nineteen disconnected states,
+  scoped navigation, unsaved setting drafts, missing checksums, old versus new
+  publication, unavailable media/service/files, failures, running steps,
+  playbook download contents, unconfirmed client application, and narrow layouts.
+- Built main/publisher RPMs on RHEL and installed both from staged local files
+  on the isolated test host. Saved source and publication settings, original
+  imported content, old public snapshot URLs, SELinux enforcement, and outbound
+  isolation were preserved.
+- Prepared a fresh small RHEL repository snapshot in separate connected test
+  state without changing the operator's mirror profile. Transferred its archive
+  and sidecar and verified byte count and SHA-256 before staging it in the saved
+  disconnected inbox.
+- Through the deployed Cockpit dashboard, imported and validated the transferred
+  content. The new import appeared as awaiting publication; the previous
+  publication's timestamp and identity remained unchanged. Reviewed the target
+  snapshot in Publish content, then published and verified its public copy.
+- Confirmed that the latest import and publication matched, and that all four
+  client automation downloads matched that durable publication record. Client
+  application remained unconfirmed. No extension JavaScript exceptions occurred;
+  an unrelated Cockpit system overview exception remained separately attributed.
+- An older deliberately corrupted test archive remained in the inbox. Its prior
+  failed validation is retained as a review item even though its sidecar claims
+  a checksum associated with previously imported content; it is never silently
+  classified as a freshly verified file.
+- Temporary browser access and its SSH tunnel were removed after validation.
+
+This validates the disconnected UI workflow against a real small RHEL import and
+publication. It does not establish client-side configuration/update completion,
+remote reachability from every client network, or broad BaseOS/AppStream coverage.

@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.7.0
+Version: 0.8.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: LicenseRef-Proprietary
@@ -64,6 +64,8 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 %dir %attr(0700,root,root) /var/www/disconnected-content/.staging
 
 %changelog
+* Wed Oct 14 2026 Project contributors - 0.8.0-1
+- Add disconnected import, publication, and client setup operations dashboard
 * Wed Oct 14 2026 Project contributors - 0.7.0-1
 - Add a connected operations dashboard and durable export history
 * Wed Oct 14 2026 Project contributors - 0.6.0-1

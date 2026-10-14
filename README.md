@@ -121,6 +121,19 @@ and an accompanying bundle as an independent trust anchor.
 
 ## Disconnected import
 
+The disconnected **Overview** follows **Choose source → Import & validate →
+Publish content → Configure clients**. It shows independent import/publication
+ages, the next action, pending inbox files, imported repository status, local
+publication availability, and recent activity. Client setup remains a manual
+step and is never marked complete because files were downloaded.
+
+**Publish content** holds web-server settings and the explicit snapshot
+publication action. **Client setup** contains the recorded publication's `.repo`
+file, setup commands, paired Ansible playbooks, inventory, and instructions.
+Changing the saved server URL requires reviewing and republishing; draft edits
+are not saved by dashboard navigation. Unmounted transfer media does not block
+using content that is already imported and published.
+
 Install the application and its runtime dependencies before isolating the host,
 or provide them through an approved offline bootstrap repository. The importer
 does not download packages or require access to the sync host.
@@ -156,7 +169,7 @@ required and validated against the host's independently provisioned RPM keyring.
    Mounting media and transferring files are currently administrator tasks
    outside the application.
 3. Choose **Import bundle**. The application never imports automatically.
-4. Follow the job under **Jobs & evidence**. A failed import leaves no usable
+4. Follow the job under **Activity & evidence**. A failed import leaves no usable
    snapshot and removes its private extraction staging directory.
 5. Open **Snapshots** for validation results and local `file://` repository URLs.
 
@@ -190,7 +203,7 @@ Install the optional `cockpit-disconnected-content-publisher` RPM and its Apache
 dependencies on the disconnected host before isolation or from an offline
 bootstrap repository. Connected sync hosts do not need this subpackage.
 
-1. Open **Publish & clients**, enter the server URL clients can reach, such as
+1. Open **Publish content**, enter the server URL clients can reach, such as
    `http://mirror.example.org`, and select **Save server URL**.
 2. Select an imported, validated snapshot and choose **Publish snapshot**. This
    creates a separate copy of indexed repository metadata and RPMs under
@@ -222,7 +235,7 @@ It requires additional storage for the public copy; the reserve is checked on
 the publication filesystem. Logs, jobs, inbox archives, snapshot state files, and
 unindexed files are excluded. Private staging is outside the Apache alias.
 
-The **Ansible client automation** section provides two downloadable playbooks,
+The **Client setup** tab provides repository configuration, two downloadable playbooks,
 an example inventory, and run instructions. Configure a canary client's pinned
 repositories, preview security updates with `--check --diff`, then apply during
 a maintenance window. The update playbook requires the exact paired repository

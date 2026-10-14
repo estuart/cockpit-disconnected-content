@@ -15,7 +15,8 @@ type Job = { id: string; operation: string; status: string; stage: string; creat
   files_verified?: number; authenticated?: boolean; verified_at?: string; checked_at?: string;
   source_archive_sha256?: string; already_imported?: boolean; published_at?: string; config_url?: string } };
 type Publication = { snapshot_id: string; published_at: string; verified_at: string; base_url: string;
-  job_id: string; config_url: string; client_config: string; bytes: number; os: { major: string; arch: string } };
+  job_id: string; config_url: string; client_config: string; bytes: number; os: { major: string; arch: string };
+  repositories: Record<string, { packages: number; metadata_types: string[] }> };
 type Automation = { snapshot_id: string; has_updateinfo: boolean; files: Record<string, string> };
 type Snapshot = { id: string; created: string; status: string; package_bytes: number;
   imported?: boolean; source_created?: string; verified_at?: string;
@@ -29,13 +30,22 @@ type Connected = { phase: 'select' | 'sync' | 'export' | 'verify' | 'ready' | 'f
   selection_changed: boolean; plan_job: Job | null;
   selected_repositories: { id: string; snapshot_id: string | null; synced_at: string | null;
     repository: { packages: number; package_bytes: number } | null; export: ExportRecord | null }[] };
+type IncomingBundle = { name: string; bytes: number; modified: string; has_checksum: boolean;
+  state?: 'awaiting_import' | 'imported' | 'known' | 'changed' | 'blocked'; reason?: string; snapshot_id?: string | null };
+type Disconnected = { phase: 'source' | 'waiting' | 'import_policy' | 'import' | 'publisher_setup' | 'server_url' | 'publish' | 'clients' | 'failed' | 'running';
+  reason: string; active: Job | null; attention_job: Job | null; latest_import: Snapshot | null;
+  publication_matches_latest: boolean; publication_serving: boolean; server_url_changed: boolean;
+  target_snapshot_id: string | null; pending_bundles: number; known_bundles: number; client_application: 'unconfirmed';
+  repositories: { id: string; snapshot_id: string; imported_at: string; repository: { packages: number; metadata_types: string[] };
+    publication_state: 'current' | 'older' | 'not_published' }[] };
 type State = { version: string; role: string; os: { name: string; major: string; arch: string };
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
-  jobs: Job[]; snapshots: Snapshot[]; incoming: { name: string; bytes: number; modified: string; has_checksum: boolean }[];
+  jobs: Job[]; snapshots: Snapshot[]; incoming: IncomingBundle[];
   import_source: { path: string; available: boolean; error?: string; scanned_at: string; updated_at?: string } | null;
-  publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null } | null;
-  connected: Connected | null;
+  publication: { installed: boolean; server_active: boolean; base_url: string; current: Publication | null;
+    availability: { state: 'not_published' | 'available' | 'unavailable'; reason: string } } | null;
+  connected: Connected | null; disconnected: Disconnected | null;
   capabilities: { allow_unsigned_imports: boolean } };
 type CockpitProcess = Promise<string> & { input: (data: string) => void };
 type DirectoryListing = { path: string; parent: string | null; truncated: boolean;
@@ -122,6 +132,108 @@ function FreshTime({ value }: { value?: string | null }) {
 function exportLabel(bundle?: ExportRecord | null) {
   if (!bundle) return 'Not exported';
   return { available: 'Bundle available', missing: 'Transfer files missing', changed: 'Re-verification needed', unverified: 'Historical bundle — verify before transfer' }[bundle.state];
+}
+function incomingLabel(bundle: IncomingBundle) {
+  return { awaiting_import: 'Awaiting validation', imported: 'Imported · file attributes unchanged',
+    known: 'Previously imported checksum', changed: 'Source file changed', blocked: 'Checksum needs attention' }[bundle.state ?? 'awaiting_import'];
+}
+
+function DisconnectedDashboard({ state, busy, sourceDraft, publicDraft, onTab, onPublish, onStop }: {
+  state: State; busy: boolean; sourceDraft: boolean; publicDraft: boolean; onTab: (tab: string) => void;
+  onPublish: (sid: string) => void; onStop: (id: string) => void;
+}) {
+  const flow = state.disconnected!;
+  const { phase, latest_import: latest, active, attention_job: attention } = flow;
+  const publication = state.publication!;
+  const current = publication.current;
+  const source = state.import_source!;
+  const publishing = ['publisher_setup', 'server_url', 'publish'].includes(phase) || phase === 'failed' && attention?.operation === 'publish';
+  const step = active ? active.operation === 'publish' ? 2 : 1 : publishing ? 2 : phase === 'clients' ? 3 :
+    phase === 'source' ? 0 : 1;
+  const title = { source: 'Choose an available transfer folder', waiting: 'Waiting for transferred bundles', import_policy: 'Review import policy',
+    import: 'Transferred bundles need review', publisher_setup: 'Set up the repository publisher', server_url: 'Configure the client-facing server URL',
+    publish: 'Review imported content for publication', clients: 'Published content ready for client setup',
+    failed: `Latest ${attention?.operation === 'publish' ? 'publication' : 'import'} ${attention?.status ?? 'failed'}`, running: 'Current operation' }[phase];
+  const importComplete = Boolean(latest) && !(step === 1 && (flow.pending_bundles > 0 || active?.operation === 'import' || phase === 'failed'));
+  const publishComplete = flow.publication_serving && flow.publication_matches_latest && !flow.server_url_changed && step === 3;
+  const primary = () => {
+    if (publishing && flow.target_snapshot_id) onPublish(flow.target_snapshot_id);
+    else onTab(phase === 'clients' ? 'clients' : 'incoming');
+  };
+  return <>
+    {(sourceDraft || publicDraft) && <Alert variant="info" isInline title="Unsaved settings edits">
+      This dashboard uses the saved transfer folder and server URL. Review and save changes in {sourceDraft ? 'Incoming bundles' : 'Publish content'} before starting a new operation.</Alert>}
+    <div className="dc-freshness">
+      <Card><CardTitle>Last successful import</CardTitle><CardBody>
+        <div className="dc-fresh-metric"><FreshTime value={latest?.created} /></div>
+        <p>{latest ? `${repositoryCount(Object.keys(latest.repositories).length)} · ${bytes(latest.package_bytes)} of RPM content` : 'No validated imported content has been recorded.'}</p>
+        {latest?.source_created && <p className="dc-muted">Bundle created on the connected side <Timestamp value={latest.source_created} /></p>}
+      </CardBody></Card>
+      <Card><CardTitle>Last successful publication</CardTitle><CardBody>
+        <div className="dc-fresh-metric"><FreshTime value={current?.published_at} /></div>
+        <p>{!current ? 'No publication has been recorded.' : flow.publication_serving ? 'Public files present · Apache running' : 'Publication needs attention'}</p>
+        {latest && current && !flow.publication_matches_latest && <p className="dc-muted">Clients are being offered an older or different imported snapshot.</p>}
+        {flow.server_url_changed && <p className="dc-muted">The saved server URL has changed since publication.</p>}
+      </CardBody></Card>
+    </div>
+    <Card className={`dc-next-action ${phase === 'failed' ? 'dc-next-failed' : ''}`}><CardTitle>{title}</CardTitle><CardBody>
+      {active ? <div className="dc-current"><Spinner size="md" /><div><strong>{active.operation}</strong><p>{active.stage}</p>
+        <p className="dc-muted">Elapsed {duration(active) ?? 'Waiting'} · Started {active.started ? <Timestamp value={active.started} /> : 'Waiting for worker'}</p>
+        {active.updated && <p className="dc-muted">Last stage update <FreshTime value={active.updated} /></p>}
+        <small>Runs in a system service. You can close this page and return later.</small></div>
+        <Button variant="danger" isDisabled={busy} onClick={() => onStop(active.id)}>Stop job</Button></div> : <>
+        <p>{flow.reason}</p>
+        {latest && publishing && <p className="dc-muted">Imported <Timestamp value={latest.created} /> · Snapshot {flow.target_snapshot_id?.slice(0, 8)}</p>}
+        <div className="dc-actions"><Button isDisabled={busy} onClick={primary}>
+          {publishing ? phase === 'publisher_setup' ? 'Review publisher setup' : phase === 'server_url' ? 'Set server URL' : 'Review publication' :
+            phase === 'clients' ? 'Configure clients' : phase === 'source' ? 'Choose transfer folder' : phase === 'waiting' ? 'Open transfer inbox' : phase === 'import_policy' ? 'Review import requirements' : 'Review incoming bundles'}</Button>
+          {phase === 'failed' && <Button variant="secondary" onClick={() => onTab('jobs')}>View failed attempt</Button>}
+          {current && phase !== 'clients' && <Button variant="secondary" onClick={() => onTab('clients')}>Client setup for recorded publication</Button>}
+          {phase === 'clients' && <Button variant="secondary" onClick={() => onTab('incoming')}>Review incoming bundles</Button>}
+        </div>
+      </>}
+    </CardBody></Card>
+    <ol className="dc-workflow" aria-label="Disconnected content workflow">{[
+      ['Choose source', source.available ? 'Saved transfer folder available' : 'Saved folder unavailable', source.available],
+      ['Import & validate', importComplete ? 'Validated import available' : latest ? 'Previous import retained' : 'Validate a transferred bundle', importComplete],
+      ['Publish content', publishComplete ? 'Latest import served locally' : current ? 'Recorded publication retained' : 'Publish a validated snapshot', publishComplete],
+      ['Configure clients', 'Manual action · application unconfirmed', false],
+    ].map(([name, detail, complete], index) => <li key={String(name)} className={`${complete ? 'dc-step-complete' : ''} ${step === index ? 'dc-step-current' : ''}`}
+      aria-current={step === index ? 'step' : undefined}><span className="dc-step-number">{index + 1} · {step === index && active ? 'In progress' : step === index && phase === 'failed' ? 'Needs attention' : complete ? 'Complete' : step === index ? 'Next step' : 'Remaining'}</span>
+      <strong>{name}</strong><span>{detail}</span></li>)}</ol>
+    <div className="dc-freshness">
+      <Card><CardTitle>Transfer inbox</CardTitle><CardBody>
+        <p><strong>{flow.pending_bundles}</strong> {flow.pending_bundles === 1 ? 'bundle needs' : 'bundles need'} review · {flow.known_bundles} with previously imported checksums</p>
+        <p><code>{source.path}</code></p><p className="dc-muted">Last scanned <Timestamp value={source.scanned_at} /></p>
+        {!source.available && <p>{source.error}</p>}
+        <Button variant="link" isInline onClick={() => onTab('incoming')}>{source.available ? 'Browse incoming bundles' : 'Choose or mount a transfer folder'}</Button>
+      </CardBody></Card>
+      <Card><CardTitle>Client setup</CardTitle><CardBody>
+        <p>{current ? 'Repository configuration and paired Ansible playbooks are available for the recorded publication.' : 'Publish a snapshot to generate client setup downloads.'}</p>
+        {current && <p className="dc-muted">Snapshot {current.snapshot_id.slice(0, 8)} · RHEL {current.os.major} · {current.os.arch}</p>}
+        <p className="dc-muted">Client configuration and security-update application are not confirmed by this host.</p>
+        <div className="dc-actions"><Button variant="secondary" onClick={() => onTab('clients')}>Open client setup</Button>
+          {current && <Button variant="link" onClick={() => downloadFile(current.client_config, 'disconnected-content.repo')}>Download .repo file</Button>}</div>
+      </CardBody></Card>
+    </div>
+    <Card><CardTitle>Imported repositories</CardTitle><CardBody>
+      {!flow.repositories.length ? <p>No validated repositories have been imported yet.</p> : <div className="dc-table-scroll"><table className="dc-status-table" aria-label="Imported repository status">
+        <thead><tr><th>Repository</th><th>Last imported</th><th>Publication status</th></tr></thead><tbody>{flow.repositories.map(repo => <tr key={repo.id}>
+          <td><strong>{repo.id}</strong><span className="dc-muted">{repo.repository.packages.toLocaleString()} {repo.repository.packages === 1 ? 'package' : 'packages'} · Advisory metadata {repo.repository.metadata_types.includes('updateinfo') ? 'present' : 'not supplied'}</span></td>
+          <td><FreshTime value={repo.imported_at} /></td><td>{{ current: 'Latest imported snapshot served', older: 'Older or unavailable publication', not_published: 'Not published' }[repo.publication_state]}</td>
+        </tr>)}</tbody></table></div>}
+      <div className="dc-actions"><Button variant="link" isInline onClick={() => onTab('snapshots')}>View imported snapshots</Button></div>
+    </CardBody></Card>
+    <Card><CardTitle>Recent activity</CardTitle><CardBody>
+      {!state.jobs.length ? <p>No operations have run yet.</p> : <ol className="dc-recent-activity">{state.jobs.slice(0, 5).map(job => <li key={job.id}>
+        <span><strong>{job.operation}</strong> <Label color={color(job.status)}>{job.status}</Label></span>
+        <span><FreshTime value={job.finished ?? job.created} /></span><span className="dc-muted">{job.stage}</span></li>)}</ol>}
+      <Button variant="link" isInline onClick={() => onTab('jobs')}>View activity &amp; evidence</Button>
+    </CardBody></Card>
+    <div className="dc-dashboard-footer"><span><strong>Available storage</strong> {bytes(state.storage.free)} · {bytes(state.storage.reserve)} reserved</span>
+      <span>{state.snapshots.length} validated {state.snapshots.length === 1 ? 'snapshot' : 'snapshots'}</span></div>
+    <p className="dc-muted">Publication availability checks local files and Apache state, not connectivity from other hosts or a fresh checksum of every package. Prototype bundles are unsigned; RPM signature checks remain enabled.</p>
+  </>;
 }
 function ExportDetails({ bundle }: { bundle: ExportRecord }) {
   return <div className="dc-export dc-transfer-files" aria-label="Transfer bundle details">
@@ -396,7 +508,7 @@ function App() {
     <header className="dc-header"><div><div className="dc-eyebrow">CONTENT OPERATIONS</div>
       <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
       <p>Build verified repository snapshots for transfer across the air gap.</p></div>
-      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.7.0'}</Label></div>
+      <div className="dc-labels"><Label color="blue">{disconnected ? 'Disconnected side' : 'Connected side'}</Label><Label color="orange">Prototype {state?.version ?? '0.8.0'}</Label></div>
     </header>
     {error && <Alert variant="danger" title="Operation could not complete" isInline><p>{error}</p></Alert>}
     {notice && <Alert variant="success" title={notice} isInline />}
@@ -407,15 +519,20 @@ function App() {
         <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
         {!disconnected && <Tab eventKey="profile" title={<TabTitleText>Repositories</TabTitleText>} />}
         {disconnected && <Tab eventKey="incoming" title={<TabTitleText>Incoming bundles</TabTitleText>} />}
-        {disconnected && <Tab eventKey="publish" title={<TabTitleText>Publish &amp; clients</TabTitleText>} />}
+        {disconnected && <Tab eventKey="publish" title={<TabTitleText>Publish content</TabTitleText>} />}
+        {disconnected && <Tab eventKey="clients" title={<TabTitleText>Client setup</TabTitleText>} />}
         <Tab eventKey="snapshots" title={<TabTitleText>{disconnected ? 'Snapshots' : 'Snapshots & exports'} <Badge isRead>{state.snapshots.length}</Badge></TabTitleText>} />
-        <Tab eventKey="jobs" title={<TabTitleText>{disconnected ? 'Jobs & evidence' : 'Activity & evidence'}</TabTitleText>} />
+        <Tab eventKey="jobs" title={<TabTitleText>Activity &amp; evidence</TabTitleText>} />
       </Tabs>
       <section className="dc-content">
         {tab === 'overview' && !disconnected && state.connected && <ConnectedDashboard state={state} busy={busy} draft={dirty}
           onTab={setTab} onStart={(operation, sid) => { void start(operation, sid, false); }}
           onStop={id => { void act(() => call(['cancel', id])); }} />}
-        {tab === 'overview' && (disconnected || !state.connected) && <>
+        {tab === 'overview' && disconnected && state.disconnected && <DisconnectedDashboard state={state} busy={busy}
+          sourceDraft={sourceDirty} publicDraft={publicDirty} onTab={setTab}
+          onPublish={sid => { setPublishSnapshot(sid); setTab('publish'); }}
+          onStop={id => { void act(() => call(['cancel', id])); }} />}
+        {tab === 'overview' && (disconnected ? !state.disconnected : !state.connected) && <>
           <div className="dc-stats">
             <Card><CardTitle>Available storage</CardTitle><CardBody><div className="dc-metric">{bytes(state.storage.free)}</div>
               <p>{bytes(state.storage.reserve)} reserved for the operating system and other workloads</p></CardBody></Card>
@@ -443,7 +560,7 @@ function App() {
             <p className="dc-muted">A new size preflight is performed for every sync. Metadata refresh may use additional cache space.</p>
           </CardBody></Card>}
           <Alert variant="info" isInline title={disconnected ? 'Disconnected import prototype' : 'Connected sync prototype'}>
-            <p>Transfer bundles carry checksums, without a cryptographic signature. {disconnected ? 'Use Publish & clients to serve validated snapshots and obtain client configuration. Client configuration and updates are explicit administrator actions.' : 'Transfer a verified bundle to a disconnected host for import and publication.'}</p>
+            <p>Transfer bundles carry checksums, without a cryptographic signature. {disconnected ? 'Use Publish content to serve validated snapshots and obtain client configuration. Client configuration and updates are explicit administrator actions.' : 'Transfer a verified bundle to a disconnected host for import and publication.'}</p>
           </Alert>
         </>}
         {tab === 'incoming' && disconnected && <>
@@ -479,9 +596,11 @@ function App() {
             {!state.incoming.length && state.import_source?.available && <p>No transfer archives were found in this directory.</p>}
             {state.incoming.map(bundle => <div className="dc-repo" key={bundle.name}><div><strong>{bundle.name}</strong>
               <p>{bytes(bundle.bytes)} · {bundle.has_checksum ? 'Checksum sidecar present' : 'Checksum sidecar missing'}</p>
-              <p className="dc-muted">File modified <Timestamp value={bundle.modified} /></p></div>
-              <Button isDisabled={disabled || sourceDirty || !bundle.has_checksum || !state.capabilities.allow_unsigned_imports}
-                onClick={() => { void start('import', bundle.name); }}>Import bundle</Button></div>)}
+              <p className="dc-muted">File modified <Timestamp value={bundle.modified} /></p>
+              {bundle.state && <><Label color={['known', 'imported'].includes(bundle.state) ? 'blue' : bundle.state === 'blocked' ? 'orange' : 'grey'}>{incomingLabel(bundle)}</Label>
+                <p className="dc-muted">{bundle.reason}</p></>}</div>
+              <Button isDisabled={disabled || sourceDirty || !bundle.has_checksum || bundle.state === 'blocked' || !state.capabilities.allow_unsigned_imports}
+                onClick={() => { void start('import', bundle.name); }}>{['known', 'imported'].includes(bundle.state ?? '') ? 'Recheck bundle' : 'Import bundle'}</Button></div>)}
           </CardBody></Card>
         </>}
         {tab === 'profile' && <Card><CardTitle>Choose content to mirror</CardTitle><CardBody>
@@ -532,7 +651,21 @@ function App() {
             <div className="dc-actions"><Button isDisabled={disabled || publicDirty || !publishSnapshot || !state.publication?.installed || !state.publication.base_url}
               onClick={() => { void start('publish', publishSnapshot); }}>Publish snapshot</Button></div>
           </CardBody></Card>
-          {state.publication?.current ? <Card><CardTitle>Currently published snapshot</CardTitle><CardBody>
+          {state.publication?.current && <Card><CardTitle>Currently published snapshot</CardTitle><CardBody>
+            <p><strong>{state.publication.current.snapshot_id}</strong> · Published <FreshTime value={state.publication.current.published_at} /></p>
+            <p>Public copy verified <Timestamp value={state.publication.current.verified_at} /> · {bytes(state.publication.current.bytes)}</p>
+            <p>{state.publication.availability.reason} · {state.publication.server_active ? 'Apache running' : 'Apache not running'}</p>
+            <p>Client configuration: <code>{state.publication.current.config_url}</code></p>
+            {state.disconnected?.latest_import && !state.disconnected.publication_matches_latest && <p className="dc-muted">The latest imported snapshot has not replaced this publication.</p>}
+            <div className="dc-actions"><Button variant="secondary" onClick={() => setTab('clients')}>Open client setup</Button></div>
+          </CardBody></Card>}
+        </>}
+        {tab === 'clients' && disconnected && <>
+          {state.publication?.current ? <Card><CardTitle>Client setup for recorded publication</CardTitle><CardBody>
+            {!state.disconnected?.publication_serving && <Alert variant="warning" isInline title="Publication availability needs attention">
+              Review Publish content before using these URLs. Downloads reflect the recorded publication; current web availability is not confirmed.</Alert>}
+            {state.disconnected?.server_url_changed && <Alert variant="info" isInline title="Saved server URL differs from these downloads">
+              Republish content to generate client configuration for the saved URL.</Alert>}
             <p><strong>{state.publication.current.snapshot_id}</strong> · Published <Timestamp value={state.publication.current.published_at} /></p>
             <p>Public copy verified <Timestamp value={state.publication.current.verified_at} /> · {bytes(state.publication.current.bytes)}</p>
             <p>Client platform: RHEL {state.publication.current.os.major} · {state.publication.current.os.arch}</p>
@@ -551,7 +684,7 @@ sudo dnf --disablerepo='*' --enablerepo='dc-*' updateinfo list security
 sudo dnf --disablerepo='*' --enablerepo='dc-*' upgrade --security --assumeno`}</pre>
             <p className="dc-muted">The preview does not apply updates. After reviewing the transaction and your maintenance policy, an administrator can run the upgrade without --assumeno. Publication does not configure clients, initiate updates, or reboot hosts.</p>
             <ClientAutomation key={state.publication.current.job_id} publication={state.publication.current} />
-          </CardBody></Card> : <Card><CardBody>No snapshot has been published yet. Publish one to generate the client configuration.</CardBody></Card>}
+          </CardBody></Card> : <Card><CardBody>Publish a validated snapshot to generate repository configuration and client playbooks. <Button variant="link" onClick={() => setTab('publish')}>Open Publish content</Button></CardBody></Card>}
         </>}
         {tab === 'snapshots' && <>
           {!disconnected && <p className="dc-muted">Newest content first. Each snapshot retains its own export and verification record. Availability does not confirm transfer or disconnected import.</p>}

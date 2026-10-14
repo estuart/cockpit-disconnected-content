@@ -173,10 +173,68 @@ try {
     await app.getByRole('tab', { name: 'Overview', exact: true }).click();
     console.log('Connected dashboard, durable historical export, preserved export age, saved selection, workflow transitions, and transfer-file details passed');
   }
+  if (process.argv.includes('--check-disconnected')) {
+    if (!disconnected || !initialState.disconnected) throw new Error('Disconnected dashboard backend required');
+    const status = () => app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })));
+    await expect(app.locator('.dc-freshness').getByText('Last successful import', { exact: true })).toBeVisible();
+    await expect(app.getByRole('list', { name: 'Disconnected content workflow' })).toBeVisible();
+    if (process.argv.includes('--run-disconnected-cycle')) {
+      const name = process.env.COCKPIT_TEST_BUNDLE;
+      if (!name) throw new Error('Stage a new transfer bundle and set COCKPIT_TEST_BUNDLE');
+      const before = await status();
+      const previous = before.jobs.map(job => job.id);
+      await app.getByRole('tab', { name: 'Incoming bundles', exact: true }).click();
+      const row = app.locator('.dc-repo').filter({ hasText: name });
+      await expect(row.getByText('Awaiting validation', { exact: true })).toBeVisible();
+      await row.getByRole('button', { name: 'Import bundle', exact: true }).click();
+      let imported;
+      await expect.poll(async () => {
+        imported = (await status()).jobs.find(job => job.operation === 'import' && !previous.includes(job.id));
+        return imported?.status;
+      }, { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+      const afterImport = await status();
+      expect(afterImport.disconnected.latest_import.id).toBe(imported.snapshot_id);
+      expect(afterImport.disconnected.phase).toBe('publish');
+      expect(afterImport.publication.current?.published_at).toBe(before.publication.current?.published_at);
+      expect(afterImport.disconnected.publication_matches_latest).toBe(false);
+      await expect(app.getByText('Review imported content for publication', { exact: true })).toBeVisible({ timeout: 15000 });
+      await page.screenshot({ path: '.local/cockpit-disconnected-awaiting-publication.png', fullPage: true });
+      await app.getByRole('button', { name: 'Review publication', exact: true }).click();
+      await expect(app.getByLabel('Snapshot to publish', { exact: true })).toHaveValue(imported.snapshot_id);
+      await app.getByRole('button', { name: 'Publish snapshot', exact: true }).click();
+      let published;
+      await expect.poll(async () => {
+        published = (await status()).jobs.find(job => job.operation === 'publish' && !previous.includes(job.id));
+        return published?.status;
+      }, { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
+      const afterPublish = await status();
+      expect(afterPublish.publication.current.snapshot_id).toBe(imported.snapshot_id);
+      expect(afterPublish.disconnected.publication_matches_latest).toBe(true);
+      expect(afterPublish.disconnected.publication_serving).toBe(true);
+      expect(afterPublish.disconnected.client_application).toBe('unconfirmed');
+      expect(afterPublish.import_source.path).toBe(before.import_source.path);
+      expect(afterPublish.publication.base_url).toBe(before.publication.base_url);
+      await writeFile('.local/disconnected-dashboard-cycle.json', JSON.stringify({ imported, published,
+        before: before.disconnected, afterImport: afterImport.disconnected, afterPublish: afterPublish.disconnected }, null, 2));
+    }
+    await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await expect(app.getByRole('table', { name: 'Imported repository status' })).toBeVisible();
+    await expect(app.locator('.dc-workflow li').last()).toContainText('application unconfirmed');
+    await expect(app.locator('.dc-workflow li').last()).not.toHaveClass(/dc-step-complete/);
+    await page.screenshot({ path: '.local/cockpit-disconnected-dashboard.png', fullPage: true });
+    await app.getByRole('tab', { name: 'Client setup', exact: true }).click();
+    await expect(app.getByRole('heading', { name: 'Ansible client automation', exact: true })).toBeVisible();
+    await expect(app.getByLabel('Client repository configuration', { exact: true })).toContainText('/snapshots/');
+    await page.screenshot({ path: '.local/cockpit-client-setup.png', fullPage: true });
+    await app.getByRole('tab', { name: 'Overview', exact: true }).click();
+    console.log('Disconnected dashboard, import/publication separation, local service availability, saved settings, and unconfirmed client application passed');
+  }
   if (process.argv.includes('--check-automation')) {
     if (!disconnected || !initialState.publication?.current) throw new Error('Publish a snapshot before checking automation downloads');
-    const publication = initialState.publication.current;
-    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    const publication = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
+      ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })).publication.current);
+    await app.getByRole('tab', { name: 'Client setup', exact: true }).click();
     await expect(app.getByRole('heading', { name: 'Ansible client automation', exact: true })).toBeVisible();
     const expected = await app.evaluate(async jobId => JSON.parse(await window.cockpit.spawn(
       ['/usr/libexec/disconnected-content', 'client-automation', jobId], { superuser: 'require', err: 'message' })), publication.job_id);
@@ -213,7 +271,7 @@ try {
     if (!before.snapshots.length) throw new Error('Import a validated snapshot before the publication test');
     const previous = before.jobs.map(job => job.id);
     const snapshot = before.snapshots[0];
-    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    await app.getByRole('tab', { name: 'Publish content', exact: true }).click();
     await app.getByRole('textbox', { name: 'Public server URL', exact: true }).fill(origin);
     await app.getByRole('button', { name: 'Save server URL', exact: true }).click();
     await expect.poll(async () => (await status()).publication.base_url).toBe(origin);
@@ -221,11 +279,11 @@ try {
     await app.getByRole('button', { name: 'Publish snapshot', exact: true }).click();
     await expect.poll(async () => (await status()).jobs.find(job => job.operation === 'publish' && !previous.includes(job.id))?.status,
       { timeout: 120000, intervals: [1000, 2000] }).toBe('succeeded');
-    await app.getByRole('tab', { name: 'Publish & clients', exact: true }).click();
+    await app.getByRole('tab', { name: 'Client setup', exact: true }).click();
     const config = app.getByLabel('Client repository configuration', { exact: true });
     await expect(config).toContainText(`baseurl=${origin}/disconnected-content/snapshots/${snapshot.id}/`);
     await expect(config).toContainText('gpgcheck=1');
-    await expect(app.getByText('Apache running', { exact: true })).toBeVisible();
+    expect((await status()).publication.server_active).toBe(true);
     await expect(app.getByLabel('Client setup commands', { exact: true })).toContainText('upgrade --security --assumeno');
     const downloadEvent = page.waitForEvent('download');
     await app.getByRole('button', { name: 'Download .repo file', exact: true }).click();
@@ -252,7 +310,7 @@ try {
     const row = app.locator('.dc-repo').filter({ hasText: bundle });
     const previousJobs = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
       ['/usr/libexec/disconnected-content', 'status'], { superuser: 'require', err: 'message' })).jobs.map(j => j.id));
-    await row.getByRole('button', { name: 'Import bundle', exact: true }).click();
+    await row.getByRole('button', { name: /^(Import bundle|Recheck bundle)$/ }).click();
     let imported;
     await expect.poll(async () => {
       const state = await app.evaluate(async () => JSON.parse(await window.cockpit.spawn(
@@ -263,7 +321,7 @@ try {
     await app.getByRole('tab', { name: /^Snapshots/ }).click();
     await expect(app.getByText('Local repository URLs', { exact: true }).first()).toBeVisible({ timeout: 15000 });
     await page.screenshot({ path: '.local/cockpit-import.png', fullPage: true });
-    await app.getByRole('tab', { name: 'Jobs & evidence', exact: true }).click();
+    await app.getByRole('tab', { name: 'Activity & evidence', exact: true }).click();
     await expect(app.getByText(/Evidence verified|Archive matched existing snapshot/).first()).toBeVisible({ timeout: 15000 });
     const latestJob = app.locator('.pf-v6-c-card').filter({ hasText: `Job ${imported.id}` });
     await expect(latestJob).toBeVisible({ timeout: 15000 });
@@ -308,7 +366,7 @@ try {
     }, { timeout: 30000, intervals: [1000] }).toBe('succeeded');
     await writeFile('.local/browser-cycle.json', JSON.stringify({ sync: started.id, export: exported }, null, 2));
     console.log('Browser-started CDN sync survived page closure; snapshot export and archive verification passed');
-    await app.getByRole('tab', { name: disconnected ? 'Jobs & evidence' : 'Activity & evidence', exact: true }).click();
+    await app.getByRole('tab', { name: 'Activity & evidence', exact: true }).click();
     await page.screenshot({ path: '.local/cockpit-jobs.png', fullPage: true });
     await app.getByRole('tab', { name: 'Overview', exact: true }).click();
   }

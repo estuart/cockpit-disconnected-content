@@ -136,3 +136,34 @@ integrity checks are surfaced as actions. Export and checksum promotion are not
 one filesystem transaction; an interrupted replacement is detected by mismatched
 records/files and must be rebuilt. Physical transfer and remote import are never
 inferred from export completion.
+
+## Disconnected operations dashboard
+
+Disconnected status derives its workflow from saved source settings, bounded
+checksum-sidecar reads, validated imported snapshots, durable publication state,
+local publication availability, and relevant import/publication attempts. Import
+and publication dates are independent; a newer import never inherits the older
+publication's identity. Source bundle creation time is shown separately from
+local import time. Existing published content remains usable if transfer media
+is later unmounted or new imports are disabled by policy.
+
+`import-records/<job-id>.json` retains successful source-file checks, including
+source path, archive digest, original import time, check time, and file attributes.
+The dashboard does not hash archives on each poll. A claimed sidecar checksum
+matching prior imported content is explicitly distinguished from a source file
+whose attributes match a completed import check. Changed source files and prior
+failed imports remain review items; a known checksum cannot hide a failed check
+of that file. Every explicit import/recheck still verifies the archive digest,
+and source attribute changes during verification prevent its new evidence from
+being recorded. Rechecking existing content does not advance its import date.
+
+Publication availability checks local regular repository indexes, exact client
+configuration, publisher installation, and Apache activity. It does not probe
+client network paths or revalidate every package on a status poll. Missing files,
+stopped service, a different latest import, or a changed saved server URL direct
+operators to review publication. Publication remains an explicit action.
+
+Client setup is a dedicated tab; downloads are pinned to the recorded publication.
+No client is marked configured or updated from a download, and the workflow's
+last step remains unconfirmed. The application does not execute remote Ansible,
+store client credentials, or add AAP integration.

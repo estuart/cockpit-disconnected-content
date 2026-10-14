@@ -1,7 +1,8 @@
 # Downloadable client automation
 
-Version 0.6 adds four downloads under **Publish & clients → Ansible client
-automation** after a snapshot has been published:
+The **Client setup → Ansible client automation** section provides four downloads
+after a snapshot has been published (introduced in version 0.6 and moved to its
+own tab in version 0.8):
 
 | Download | Purpose |
 | --- | --- |
