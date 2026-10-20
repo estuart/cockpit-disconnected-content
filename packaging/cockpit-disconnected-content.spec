@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.1.0
+Version: 0.10.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: LicenseRef-Proprietary
@@ -13,13 +13,24 @@ Requires: cockpit-bridge >= 300
 Requires: python3 >= 3.9
 Requires: dnf-plugins-core
 Requires: rpm
+Requires: gnupg2
 Requires: zstd
 Requires: systemd
 
 %description
-A connected-side prototype for syncing, validating, and exporting RPM
-repository snapshots through the Cockpit web console. Disconnected import
-and publication are planned capabilities.
+A prototype for syncing, validating, exporting, importing, and publishing RPM
+repository snapshots through the Cockpit web console.
+
+%package publisher
+Summary: Apache static publication for validated disconnected repository snapshots
+Requires: %{name} = %{version}-%{release}
+Requires: httpd
+Requires: policycoreutils
+
+%description publisher
+Optional Apache configuration and a dedicated public content tree. Install this
+subpackage on disconnected publishing hosts. It does not change firewall policy
+or enable the server until an administrator publishes a snapshot through Cockpit.
 
 %prep
 %autosetup
@@ -46,6 +57,31 @@ and publication are planned capabilities.
 %{_datadir}/cockpit/disconnected-content/
 %{_unitdir}/disconnected-content-job@.service
 
+%files publisher
+%config(noreplace) /etc/httpd/conf.d/disconnected-content.conf
+%dir /var/www/disconnected-content
+%dir /var/www/disconnected-content/public
+%dir /var/www/disconnected-content/public/snapshots
+%dir %attr(0700,root,root) /var/www/disconnected-content/.staging
+
 %changelog
+* Wed Oct 14 2026 Project contributors - 0.10.0-1
+- Include public repository keys in bundles for explicit disconnected review
+* Wed Oct 14 2026 Project contributors - 0.9.0-1
+- Add reviewed repository signing keys and pinned client key enrollment
+* Wed Oct 14 2026 Project contributors - 0.8.0-1
+- Add disconnected import, publication, and client setup operations dashboard
+* Wed Oct 14 2026 Project contributors - 0.7.0-1
+- Add a connected operations dashboard and durable export history
+* Wed Oct 14 2026 Project contributors - 0.6.0-1
+- Add pinned downloadable Ansible playbooks for client repositories and security updates
+* Wed Oct 14 2026 Project contributors - 0.5.0-1
+- Add Apache publication and generated client repository configuration
+* Wed Oct 14 2026 Project contributors - 0.4.0-1
+- Add a host directory picker with mounted-filesystem shortcuts
+* Wed Oct 14 2026 Project contributors - 0.3.0-1
+- Add configurable import sources and timestamped job evidence
+* Wed Oct 14 2026 Project contributors - 0.2.0-1
+- Add validated disconnected imports and a transfer inbox
 * Wed Oct 14 2026 Project contributors - 0.1.0-1
 - Initial connected-side prototype

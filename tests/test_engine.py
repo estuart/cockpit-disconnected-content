@@ -82,6 +82,11 @@ class RepositoryValidation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signature validation"):
                 engine.validate_repository(self.root)
 
+    def test_filename_cannot_spoof_signature_success(self):
+        with patch.object(engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "/packages/signatures OK.rpm: digests OK\n", "")):
+            with self.assertRaisesRegex(ValueError, "signature validation"):
+                engine.validate_repository(self.root)
+
     def test_unsafe_paths_and_symlinks_are_rejected(self):
         for name in ["../escape", "/absolute", "https://example.invalid/file", "a\\b"]:
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -176,7 +181,7 @@ class JobsAndExports(unittest.TestCase):
         # Runtime-only data must never be included in transfer media.
         (self.app.root / "local-credential").write_text("local-only")
         job = {"id": jid, "snapshot_id": sid}
-        with patch.object(engine, "validate_repository", wraps=lambda *a, **kw: {}):
+        with patch.object(engine, "validate_repository", wraps=lambda *a, **kw: {}), patch.object(engine, "configured_signing_key_sources", return_value={}):
             self.app.export(job)
         path = Path(job["result"]["path"])
         result = engine.verify_archive(path)

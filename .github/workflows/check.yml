@@ -17,4 +17,9 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/dashboard-smoke.mjs
+      - run: node scripts/signing-key-smoke.mjs
       - run: python3 -m unittest discover -s tests -v
+      - run: python3 -m pip install 'ansible-core>=2.19,<2.20'
+      - run: python3 scripts/check-playbooks.py

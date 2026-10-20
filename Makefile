@@ -1,4 +1,4 @@
-VERSION := 0.1.0
+VERSION := 0.10.0
 PREFIX ?= /usr
 DESTDIR ?=
 
@@ -14,6 +14,9 @@ install:
 	install -m 0755 backend/disconnected_content.py $(DESTDIR)$(PREFIX)/libexec/disconnected-content
 	install -Dm0644 packaging/config.json $(DESTDIR)/etc/disconnected-content/config.json
 	install -Dm0644 packaging/disconnected-content-job@.service $(DESTDIR)$(PREFIX)/lib/systemd/system/disconnected-content-job@.service
+	install -Dm0644 packaging/disconnected-content.conf $(DESTDIR)/etc/httpd/conf.d/disconnected-content.conf
+	install -d -m 0755 $(DESTDIR)/var/www/disconnected-content/public/snapshots
+	install -d -m 0700 $(DESTDIR)/var/www/disconnected-content/.staging
 dist: build
 	python3 scripts/release.py
 rpm: dist
