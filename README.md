@@ -1,102 +1,170 @@
 # Disconnected Content for Cockpit
 
-A connected-side prototype for building, validating, and exporting RPM repository
-snapshots through the RHEL web console. Install on a registered RHEL sync host;
-repositories are selected from that host's existing configuration.
+> **Source branch for this documented prototype:** The version 0.10.0 workflows and screenshots below describe [`feature/disconnected-import`](https://github.com/estuart/cockpit-disconnected-content/tree/feature/disconnected-import), tracked in [PR #1](https://github.com/estuart/cockpit-disconnected-content/pull/1). That implementation is awaiting merge into `main`. Build and install from the feature branch to use these workflows; the documentation and screenshot links below point to that branch.
 
-## Prototype capabilities
+Mirror RPM repositories on a connected RHEL host, carry a verified bundle across
+the air gap, and import and publish that content through the RHEL web console.
+The disconnected host also generates client repository configuration and Ansible
+playbooks for configuring repositories and applying security updates.
 
-- Cockpit UI with repository selection, a snapshot size budget, and storage checks.
-- Size preflight using DNF's declared package sizes before every sync.
-- Full repository sync with original metadata and forced RPM signature checking.
-- Persistent systemd jobs that continue when a browser tab is closed.
-- Metadata checksums, referenced RPM checksums, trusted RPM signature validation,
-  and required advisory metadata for BaseOS/AppStream.
-- Versioned snapshots, uncompressed tar transfer bundles, per-file manifests,
-  archive read-back verification, and SHA-256 sidecars.
-- Job history, local command output, and explicit failed/interrupted states.
+**Prototype 0.10.0.** Tested on RHEL 10.2 x86_64. Transfer manifests are currently
+unsigned and imports require explicit administrator opt-in. RPM signature checks
+remain mandatory. This is an independently maintained prototype; running inside
+Cockpit does not create a Red Hat product support commitment. Operators remain
+responsible for subscriptions, content access, and their transfer policy.
 
-Import, publication, incremental transfers, signed bundle manifests, and host
-patching are not implemented. This is an independently maintained prototype;
-the extension does not acquire a Red Hat product support commitment by running
-inside Cockpit. RHEL subscriptions and access rights remain the operator's responsibility.
+[Install and select a role](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/installation.md) ·
+[Operator guide](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md) ·
+[Client automation](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/automation-options.md) ·
+[Build and contribute](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/development.md) ·
+[Validation](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/validation.md) ·
+[Limitations](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/limitations.md)
 
-## Build and test
+## One application, two host roles
 
-The frontend is compiled on a build machine. Runtime hosts do not need npm.
+**Both modes live in this repository and ship in the same main RPM.** The
+root-owned `/etc/disconnected-content/config.json` selects the host's role.
+The optional publisher RPM adds Apache configuration and its dependencies.
 
-```sh
-npm ci
-npm run typecheck
-npm run build
-python3 -m unittest discover -s tests -v
+| Host purpose | Configuration | Packages |
+| --- | --- | --- |
+| Mirror and export content | `"role": "connected"` | `cockpit-disconnected-content` |
+| Import content inside the air gap | `"role": "disconnected"` | `cockpit-disconnected-content` |
+| Import and serve repositories to clients | `"role": "disconnected"` | Main RPM plus `cockpit-disconnected-content-publisher` |
+| Consume published repositories | Generated `.repo` and approved public keys | No extension installation required |
+
+The backend enforces the configured role. Installing the publisher does not
+change the role, start publication, open firewall ports, or configure clients.
+Network isolation remains an operating-system and network-policy responsibility.
+
+```mermaid
+flowchart LR
+    U[Configured RPM repositories] --> C[Connected host: sync and export]
+    C --> B[Bundle with metadata, RPMs, and public keys]
+    B -->|Approved transfer process plus SHA-256 sidecar| D[Disconnected host: review and import]
+    D --> P[Optional publisher on the disconnected host]
+    P --> H[RHEL clients inside the air gap]
 ```
 
-On a RHEL build machine with RPM build tools, GNU make, and GNU tar:
+Today, installation uses DNF and role configuration; there is no role-selecting
+installer script. We recommend retaining one application RPM and the optional
+publisher, then adding a setup command with an explicit role choice. See the
+[current packaging and proposed setup interface](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/deployment-design.md).
 
-```sh
-make rpm
-sudo dnf install ./build/rpmbuild/RPMS/noarch/cockpit-disconnected-content-*.rpm
-sudo systemctl enable --now cockpit.socket
-```
+## Get started
 
-The RPM contains compiled frontend assets. `make dist` creates a portable source
-archive using Python; the target build host needs RPM build tools and GNU make.
+1. **Build the RPMs** using the [development guide](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/development.md), or obtain
+   matching artifacts from your approved build process. Prebuilt GitHub releases
+   are not currently published.
+2. **Install the main RPM on both hosts**, and the optional publisher only where
+   repositories will be served. Provision all runtime dependencies before
+   isolating the disconnected host, or use an approved offline bootstrap repository.
+3. **Choose the role and storage** in the root-owned configuration. A fresh
+   installation defaults to connected mode; set the disconnected host explicitly.
+   Review the separate unsigned-manifest prototype opt-in before enabling imports.
+4. Enable `cockpit.socket`, open your host's web console, and select
+   **Disconnected Content** with administrative access.
+5. Start with one small repository, complete the workflow below, and configure a
+   canary client before expanding the rollout.
 
-Open the existing RHEL web console and select **Disconnected Content**. Use an
-account authorized for administrative access. The prototype deliberately requires
-administrative access for all backend calls.
+[Installation instructions](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/installation.md) include exact package selection,
+connected/disconnected configuration examples, offline prerequisites, upgrades,
+and storage planning. Runtime hosts do not need Node.js or npm.
 
-## Storage configuration
+## Connected workflow
 
-The root-owned `/etc/disconnected-content/config.json` selects the local state and
-content directory. Choose a filesystem sized for repository content plus exports:
+Select repositories and a snapshot budget, check capacity, sync and validate the
+content, then **Build & verify transfer bundle**. The dashboard shows independent
+sync/export ages, per-repository status, the next action, and recent activity.
+Long operations run as systemd jobs and continue if the browser closes.
 
-```json
-{
-  "role": "connected",
-  "state_dir": "/srv/disconnected-content",
-  "reserve_gib": 5
-}
-```
+![Connected operations dashboard with repository freshness and a visible transfer workflow](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/connected-dashboard.png?raw=true)
 
-Keep this file owned by root with mode `0644` or stricter. Let the engine create
-the state directory, or precreate it owned by root with mode `0700`. Do not use a
-directory writable by other users. Configure storage before the first job; moving
-existing state is an administrator task, not an automatic migration.
+Transfer the `.tar` and its matching `.tar.sha256` together through your approved
+process. Exports include original repository metadata, RPMs, and public signing
+keys from configured `gpgkey` sources. They exclude subscription certificates,
+repository configuration, credentials, and local logs. The connected host does
+not claim that a transfer or disconnected import succeeded.
 
-The size check estimates declared RPM bytes plus a full export and working
-allowance. It is not a storage quota and cannot predict concurrent use by other
-workloads. DNF metadata caches also consume space on their configured filesystem.
-Start with a small repository and a conservative snapshot budget.
+[Connected cycle and export evidence](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md#connected-cycle)
 
-## First cycle
+## Disconnected workflow
 
-1. Select a repository in **Repositories** and save the profile.
-2. Run **Check size** and inspect the result.
-3. Run **Sync snapshot**. Return later to see the persisted job result.
-4. Open **Snapshots** and build a transfer bundle from a validated snapshot.
-5. Open **Jobs & evidence** for the server-side archive path and digest.
-6. Carry the `.tar` and matching `.tar.sha256` through the approved transfer process.
+Choose the transfer folder or mounted media in **Incoming bundles**, inspect any
+bundled signing keys, approve the required keys, and import the bundle. Then
+publish a validated snapshot and open **Client setup**. The dashboard keeps import,
+publication, and client-configuration steps visible, with separate timestamps.
 
-The source host's enabled repositories are preserved. Each command enables only
-the profile's repositories for that invocation. The application does not export
-subscription certificates, repository configuration, or local job logs.
+![Disconnected operations dashboard showing import, publication, and client setup](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/disconnected-dashboard.png?raw=true)
 
-Bundles are **unsigned** in this version. Their hashes detect content corruption;
-they do not establish who produced the bundle. RPM signatures remain independently
-verified against the host's trusted RPM keyring. Do not treat a transferred key
-and an accompanying bundle as an independent trust anchor.
+The directory picker browses folders on the disconnected host. Only the saved
+folder is scanned. A failed import retains diagnostics and does not expose a
+partial snapshot. Publishing creates a separately verified public copy; older
+snapshot URLs remain available when the current publication advances.
 
-## Development and publication hygiene
+[Transfer inbox and directory picker](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md#disconnected-import) ·
+[Incoming bundle screenshot](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/incoming-bundles.png)
 
-Keep hostnames, addresses, SSH aliases, credentials, entitlement files, mirror
-content, screenshots of real inventories, local logs, and deployment notes out
-of Git. `.local/` is ignored for machine-specific working notes. Use generic
-examples in issues and pull requests. Review staged content before every commit.
+## Bundled keys require approval
 
-No open-source license grant has been selected yet. Select a license and review
-third-party notices before a public release. Generated frontend bundles preserve
-dependency license notices.
+Choose **Review bundled keys** to verify the archive and stage included keys as
+untrusted candidates. **Review bundled public key** shows the identity, full
+fingerprint, expiration, and source bundle. Verify the fingerprint independently,
+confirm it, and explicitly approve the key for its repository before importing.
 
-See [architecture](docs/architecture.md) and [prototype limitations](docs/limitations.md).
+![Signing-key confirmation with the approval button disabled until explicit confirmation](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/signing-key-review.png?raw=true)
+
+Including a key in a bundle, inspecting an archive, and viewing a fingerprint do
+not grant trust. Existing approvals remain in effect. Imports pin approved keys;
+publication revalidates packages with those keys and carries them into client
+setup. Unsigned RPMs and invalid signatures are blocked. Bundled keys are not
+silently added to the host-wide RPM database.
+
+[Signing-key workflow and trust model](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md#repository-signing-keys) ·
+[Untrusted candidate screenshot](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/bundled-key-candidates.png)
+
+## Publish and configure clients
+
+The optional Apache publisher serves pinned snapshot repositories and reviewed
+public keys. **Client setup** provides a `.repo` file, public-key downloads, setup
+commands, and four paired automation downloads:
+
+| Download | Purpose |
+| --- | --- |
+| `configure-repos.yml` | Verify full key fingerprints, enroll approved keys, install the pinned repository file, and refresh metadata |
+| `security-updates.yml` | Check pinned key/configuration files and apply security updates from the selected repositories |
+| `inventory.ini` | Example inventory to replace with your approved client hosts |
+| `README-client-automation.txt` | Prerequisites, preview/apply commands, and rollout instructions |
+
+![Client automation downloads and preview commands, including the advisory-metadata prerequisite](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/screenshots/client-automation.png?raw=true)
+
+Playbooks run from your existing Ansible control node. They process one host at
+a time, stop on failure, keep package signature checks enabled, and do not reboot
+clients. Reviewed-key setup needs `gnupg2` on clients. Security-only updates need
+`updateinfo` in every selected repository; a repository without advisories can
+still be configured, but its security playbook stops with an explanation.
+
+Cockpit does not execute fleet jobs, hold client credentials, or mark clients
+configured just because files were downloaded. AAP integration remains planned.
+
+[Publication and client setup](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md#publish-and-configure-client-hosts) ·
+[Ansible prerequisites and rollout](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/automation-options.md)
+
+## Documentation and project status
+
+All screenshots show the real frontend with **generic demo data**, fixed UTC
+timestamps, example repositories, and placeholder fingerprints. They do not show
+customer systems or actual keys to trust. See [screenshot regeneration](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/development.md#reproduce-documentation-screenshots).
+
+- [Installation and role configuration](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/installation.md)
+- [Operator procedures and troubleshooting](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/operator-guide.md)
+- [Packaging decision and proposed setup command](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/deployment-design.md)
+- [Backend architecture and trust boundaries](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/architecture.md)
+- [Validation evidence and tested boundaries](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/validation.md)
+- [Prototype limitations](https://github.com/estuart/cockpit-disconnected-content/blob/feature/disconnected-import/docs/limitations.md)
+
+Signed manifests, incremental transfers, automated key lifecycle management, and
+AAP job execution are future work. No open-source license grant has been selected
+yet; choose a license and review dependency notices before making a public release.
+Keep environment-specific data in ignored local files and use generic examples
+in commits, issues, and pull requests.
