@@ -2,7 +2,7 @@ Name: cockpit-disconnected-content
 Version: 0.10.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
-License: LicenseRef-Proprietary
+License: MIT
 URL: https://github.com/estuart/cockpit-disconnected-content
 Source0: %{name}-%{version}.tar.gz
 BuildArch: noarch
@@ -51,6 +51,7 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 %systemd_postun disconnected-content-job@.service
 
 %files
+%license LICENSE
 %doc README.md docs/
 %config(noreplace) /etc/disconnected-content/config.json
 %{_libexecdir}/disconnected-content

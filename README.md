@@ -162,7 +162,11 @@ customer systems or actual keys to trust. See [screenshot regeneration](docs/dev
 - [Prototype limitations](docs/limitations.md)
 
 Signed manifests, incremental transfers, automated key lifecycle management, and
-AAP job execution are future work. No open-source license grant has been selected
-yet; choose a license and review dependency notices before making a public release.
+AAP job execution are future work.
+
+## License
+
+[MIT](LICENSE). Bundled frontend dependencies keep their own licenses; the build
+writes their notices to `dist/index.js.LEGAL.txt`.
 Keep environment-specific data in ignored local files and use generic examples
 in commits, issues, and pull requests.
