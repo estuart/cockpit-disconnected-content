@@ -2,6 +2,7 @@
   "name": "cockpit-disconnected-content",
   "version": "0.10.0",
   "private": true,
+  "license": "MIT",
   "description": "A Cockpit extension for disconnected RPM repository workflows",
   "scripts": {
     "build": "node scripts/build.mjs",

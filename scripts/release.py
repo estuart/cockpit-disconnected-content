@@ -8,7 +8,7 @@ version = "0.10.0"
 output = root / "build" / f"cockpit-disconnected-content-{version}.tar.gz"
 output.parent.mkdir(exist_ok=True)
 with tarfile.open(output, "w:gz") as archive:
-    for name in ["backend", "dist", "packaging", "Makefile", "README.md", "docs",
+    for name in ["backend", "dist", "packaging", "LICENSE", "Makefile", "README.md", "docs",
                  "src", "scripts", "tests", "package.json", "package-lock.json", "tsconfig.json"]:
         path = root / name
         if not path.exists():
