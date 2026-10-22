@@ -1490,7 +1490,10 @@ class Engine:
             else:
                 phase, reason = "waiting", "No transfer bundles were found. Stage an archive and its matching checksum in the saved source folder."
         attention = None
-        if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"}:
+        # A failed import stops demanding attention once its file is gone from the transfer folder.
+        removed = (attempt and attempt.get("operation") == "import" and attempt.get("bundle_name")
+                   and attempt["bundle_name"] not in {b["name"] for b in incoming})
+        if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"} and not removed:
             milestone = max(latest["created"] if latest else "", current["published_at"] if current else "")
             if attempt.get("finished", attempt["created"]) > milestone:
                 phase, reason, attention = "failed", attempt["stage"], attempt

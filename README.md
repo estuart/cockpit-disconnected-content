@@ -72,11 +72,17 @@ and storage planning. Runtime hosts do not need Node.js or npm.
 ## Connected workflow
 
 Choose repositories (the selection saves as you click), then **Sync & build
-bundle**. **Settings** sets the export folder, such as a mounted transfer drive,
-and the per-snapshot size limit. One job checks free space, downloads packages and original metadata,
+bundle**. One job checks free space, downloads packages and original metadata,
 validates RPM signatures, and builds and verifies the transfer bundle. When it
 finishes, the overview shows both transfer files with copy buttons. Long
-operations run as systemd jobs and continue if the browser closes.
+operations run as systemd jobs and continue if the browser closes. **Settings**
+sets the export folder, such as a mounted transfer drive, and the per-snapshot
+size limit.
+
+Mirrors always contain the complete repository, so every package in it must be
+signed; package filters in the host's own repository files don't apply to
+mirroring. A failed sync names the problem, such as an unsigned package or an
+empty repository.
 
 ![Connected overview with a verified bundle ready to transfer](docs/screenshots/connected-dashboard.png)
 
@@ -87,7 +93,8 @@ repository configuration, credentials, and local logs. The connected host does
 not claim that a transfer or disconnected import succeeded.
 
 [Connected cycle](docs/operator-guide.md#connected-cycle) ·
-[Repository selection screenshot](docs/screenshots/connected-repositories.png)
+[Repository selection screenshot](docs/screenshots/connected-repositories.png) ·
+[Connected settings screenshot](docs/screenshots/connected-settings.png)
 
 ## Disconnected workflow
 
