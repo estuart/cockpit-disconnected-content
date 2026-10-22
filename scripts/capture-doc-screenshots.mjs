@@ -13,7 +13,6 @@ connected.connected.latest_export.bytes = 91033600;
 connected.connected.latest_export.bundled_signing_keys = 1;
 connected.snapshots[0].export.bytes = 91033600;
 connected.snapshots[0].export.bundled_signing_keys = 1;
-signing.state.bundle_key_candidates = [signing.candidate];
 signing.review.source = `Bundle ${signing.candidate.bundle_name} SHA256 ${signing.candidate.bundle_sha256}`;
 const assets = new Map(await Promise.all(['index.html', 'index.js', 'index.css'].map(async name => [name, await readFile(`dist/${name}`)])));
 const server = createServer((request, response) => {
@@ -34,51 +33,55 @@ async function pageFor(state) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.clock.install({ time: demoTime });
-  await page.addInitScript(({ state, review }) => {
+  await page.addInitScript(({ state, review, signing }) => {
     window.cockpit = { spawn(args) {
       let finish;
       const result = new Promise(resolve => { finish = resolve; });
       if (args[1] === 'status') finish(JSON.stringify(state));
       if (args[1] === 'client-automation') finish(JSON.stringify(state.automation));
-      result.input = () => finish(JSON.stringify(review));
+      result.input = input => finish(JSON.stringify(args[1] === 'bundle-info' ? signing.info : args[1] === 'scan-bundle-keys' ? signing.scan : review));
       return result;
     } };
-  }, { state, review: signing.review });
+  }, { state, review: signing.review, signing });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await expect(page.getByRole('heading', { name: 'Disconnected Content', exact: true })).toBeVisible();
   return { page, errors };
 }
 try {
   const connectedPage = await pageFor(connected);
-  await expect(connectedPage.page.getByText('Verified bundle ready for transfer', { exact: true })).toBeVisible();
+  await expect(connectedPage.page.getByText('✓ Bundle ready to transfer', { exact: true })).toBeVisible();
   await connectedPage.page.screenshot({ path: `${output}/connected-dashboard.png`, fullPage: true });
+  await connectedPage.page.getByRole('tab', { name: 'Repositories', exact: true }).click();
+  await connectedPage.page.screenshot({ path: `${output}/connected-repositories.png`, fullPage: true });
+  await connectedPage.page.getByRole('tab', { name: 'Settings', exact: true }).click();
+  await connectedPage.page.screenshot({ path: `${output}/connected-settings.png`, fullPage: true });
   expect(connectedPage.errors).toEqual([]);
   await connectedPage.page.close();
 
   const disconnectedPage = await pageFor(disconnected);
-  await expect(disconnectedPage.page.getByText('Published content ready for client setup', { exact: true })).toBeVisible();
+  await expect(disconnectedPage.page.getByText(/Clients can use the/)).toBeVisible();
   await disconnectedPage.page.screenshot({ path: `${output}/disconnected-dashboard.png`, fullPage: true });
   expect(disconnectedPage.errors).toEqual([]);
   await disconnectedPage.page.close();
 
   const keysPage = await pageFor(signing.state);
-  await keysPage.page.getByRole('tab', { name: 'Incoming bundles', exact: true }).click();
-  await expect(keysPage.page.getByRole('button', { name: 'Review bundled keys', exact: true })).toBeVisible();
+  await keysPage.page.getByRole('tab', { name: 'Content', exact: false }).click();
+  await expect(keysPage.page.getByRole('button', { name: 'Review & import', exact: true })).toBeVisible();
   await keysPage.page.screenshot({ path: `${output}/incoming-bundles.png`, fullPage: true });
-  await keysPage.page.getByRole('tab', { name: 'Signing keys', exact: true }).click();
-  await expect(keysPage.page.getByText('Untrusted candidate', { exact: true })).toBeVisible();
-  await keysPage.page.screenshot({ path: `${output}/bundled-key-candidates.png`, fullPage: true });
-  await keysPage.page.getByRole('button', { name: 'Review bundled public key', exact: true }).click();
-  const review = keysPage.page.getByRole('region', { name: 'Public signing key review' });
-  await expect(review).toBeVisible();
-  await expect(keysPage.page.getByRole('button', { name: 'Approve signing key', exact: true })).toBeDisabled();
-  await review.screenshot({ path: `${output}/signing-key-review.png` });
-  await keysPage.page.getByRole('tab', { name: 'Client setup', exact: true }).click();
-  await expect(keysPage.page.getByRole('heading', { name: 'Ansible client automation', exact: true })).toBeVisible();
-  await keysPage.page.getByRole('heading', { name: 'Ansible client automation', exact: true }).locator('..').screenshot({ path: `${output}/client-automation.png` });
+  await keysPage.page.getByRole('button', { name: 'Review & import', exact: true }).click();
+  const dialog = keysPage.page.getByRole('dialog');
+  await expect(dialog.getByLabel('Full fingerprint', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Approve & import', exact: true })).toBeDisabled();
+  await keysPage.page.screenshot({ path: `${output}/signing-key-review.png`, fullPage: true });
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await keysPage.page.getByRole('tab', { name: 'Settings', exact: true }).click();
+  await keysPage.page.screenshot({ path: `${output}/settings.png`, fullPage: true });
+  await keysPage.page.getByRole('tab', { name: 'Clients', exact: true }).click();
+  await expect(keysPage.page.getByRole('button', { name: 'Download Ansible kit (.zip)', exact: true })).toBeVisible();
+  await keysPage.page.screenshot({ path: `${output}/client-automation.png`, fullPage: true });
   expect(keysPage.errors).toEqual([]);
   await keysPage.page.close();
-  console.log('Six documentation screenshots captured from generic frontend fixtures');
+  console.log('Eight documentation screenshots captured from generic frontend fixtures');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

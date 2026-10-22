@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.10.0
+Version: 0.11.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: MIT
@@ -66,6 +66,8 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 %dir %attr(0700,root,root) /var/www/disconnected-content/.staging
 
 %changelog
+* Wed Oct 21 2026 Project contributors - 0.11.0-1
+- Streamline both workflows: combined sync and bundle job, inline key approval during import, guided publication, and a one-file Ansible kit
 * Wed Oct 14 2026 Project contributors - 0.10.0-1
 - Include public repository keys in bundles for explicit disconnected review
 * Wed Oct 14 2026 Project contributors - 0.9.0-1

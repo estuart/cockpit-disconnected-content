@@ -158,6 +158,17 @@ class DisconnectedDashboard(unittest.TestCase):
         self.assertTrue(state['publication_serving'])
         self.assertEqual(state['attention_job']['id'], job['id'])
 
+    def test_a_failed_import_clears_when_its_file_is_removed(self):
+        self.published()
+        path, _ = self.bundle()
+        job = {'id': 'e' * 32, 'operation': 'import', 'bundle_name': path.name, 'incoming_dir': str(path.parent),
+               'status': 'failed', 'created': '2026-01-02T10:00:00+00:00', 'stage': 'Missing signing key'}
+        self.assertEqual(self.state(jobs=[job])[0]['phase'], 'failed')
+        path.unlink(); path.with_suffix('.tar.sha256').unlink()
+        state, _ = self.state(jobs=[job])
+        self.assertNotEqual(state['phase'], 'failed')
+        self.assertIsNone(state['attention_job'])
+
     def test_old_source_failures_do_not_block_the_saved_source(self):
         job = {'operation': 'import', 'incoming_dir': '/different-source', 'status': 'failed',
                'created': '2026-01-02T10:00:00+00:00', 'stage': 'Checksum failed'}

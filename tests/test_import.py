@@ -274,7 +274,7 @@ class ImportSourceSettings(unittest.TestCase):
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(self.app.browse_directories({"path": "/"})["parent"], None)
 
-    def test_directory_browser_rejects_invalid_paths_and_connected_role(self):
+    def test_directory_browser_rejects_invalid_paths_and_unconfigured_role(self):
         alias = self.root / "alias"
         alias.symlink_to(self.media, target_is_directory=True)
         for path in [None, "", "relative", str(alias), str(self.root / ".."), str(self.root / "missing")]:
@@ -282,8 +282,11 @@ class ImportSourceSettings(unittest.TestCase):
                 self.app.browse_directories({"path": path})
         with self.assertRaises(ValueError):
             self.app.browse_directories({"path": str(self.media), "command": "ignored"})
+        # Connected hosts browse for an export folder; an unconfigured role cannot browse.
         self.app.config["role"] = "connected"
-        with self.assertRaisesRegex(ValueError, "disconnected installation"):
+        self.assertEqual(self.app.browse_directories({"path": str(self.media)})["path"], str(self.media))
+        self.app.config["role"] = "unset"
+        with self.assertRaisesRegex(ValueError, "configured installation role"):
             self.app.browse_directories({"path": str(self.media)})
 
     def test_mounted_locations_decode_spaces_refresh_and_omit_missing_targets(self):

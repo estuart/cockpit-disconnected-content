@@ -5,7 +5,7 @@ the air gap, and import and publish that content through the RHEL web console.
 The disconnected host also generates client repository configuration and Ansible
 playbooks for configuring repositories and applying security updates.
 
-**Prototype 0.10.0.** Tested on RHEL 10.2 x86_64. Transfer manifests are currently
+**Prototype 0.11.0.** Tested on RHEL 10.2 x86_64. Transfer manifests are currently
 unsigned and imports require explicit administrator opt-in. RPM signature checks
 remain mandatory. This is an independently maintained prototype; running inside
 Cockpit does not create a Red Hat product support commitment. Operators remain
@@ -71,12 +71,20 @@ and storage planning. Runtime hosts do not need Node.js or npm.
 
 ## Connected workflow
 
-Select repositories and a snapshot budget, check capacity, sync and validate the
-content, then **Build & verify transfer bundle**. The dashboard shows independent
-sync/export ages, per-repository status, the next action, and recent activity.
-Long operations run as systemd jobs and continue if the browser closes.
+Choose repositories (the selection saves as you click), then **Sync & build
+bundle**. One job checks free space, downloads packages and original metadata,
+validates RPM signatures, and builds and verifies the transfer bundle. When it
+finishes, the overview shows both transfer files with copy buttons. Long
+operations run as systemd jobs and continue if the browser closes. **Settings**
+sets the export folder, such as a mounted transfer drive, and the per-snapshot
+size limit.
 
-![Connected operations dashboard with repository freshness and a visible transfer workflow](docs/screenshots/connected-dashboard.png)
+Mirrors always contain the complete repository, so every package in it must be
+signed; package filters in the host's own repository files don't apply to
+mirroring. A failed sync names the problem, such as an unsigned package or an
+empty repository.
+
+![Connected overview with a verified bundle ready to transfer](docs/screenshots/connected-dashboard.png)
 
 Transfer the `.tar` and its matching `.tar.sha256` together through your approved
 process. Exports include original repository metadata, RPMs, and public signing
@@ -84,31 +92,35 @@ keys from configured `gpgkey` sources. They exclude subscription certificates,
 repository configuration, credentials, and local logs. The connected host does
 not claim that a transfer or disconnected import succeeded.
 
-[Connected cycle and export evidence](docs/operator-guide.md#connected-cycle)
+[Connected cycle](docs/operator-guide.md#connected-cycle) ·
+[Repository selection screenshot](docs/screenshots/connected-repositories.png) ·
+[Connected settings screenshot](docs/screenshots/connected-settings.png)
 
 ## Disconnected workflow
 
-Choose the transfer folder or mounted media in **Incoming bundles**, inspect any
-bundled signing keys, approve the required keys, and import the bundle. Then
-publish a validated snapshot and open **Client setup**. The dashboard keeps import,
-publication, and client-configuration steps visible, with separate timestamps.
+The overview walks through **Import → Publish → Configure clients**. Set the
+transfer folder once in **Settings**; the page then checks it automatically.
+New bundles appear on the overview with their repository count, build time, and
+whether they include signing keys. After an import, the overview offers to
+publish that snapshot; after publishing, **Clients** has the setup files.
 
-![Disconnected operations dashboard showing import, publication, and client setup](docs/screenshots/disconnected-dashboard.png)
+![Disconnected overview showing published content ready for clients](docs/screenshots/disconnected-dashboard.png)
 
-The directory picker browses folders on the disconnected host. Only the saved
-folder is scanned. A failed import retains diagnostics and does not expose a
-partial snapshot. Publishing creates a separately verified public copy; older
-snapshot URLs remain available when the current publication advances.
+A failed import retains diagnostics and does not expose a partial snapshot.
+Publishing creates a separately verified public copy; older snapshot URLs remain
+available when the current publication advances.
 
-[Transfer inbox and directory picker](docs/operator-guide.md#disconnected-import) ·
-[Incoming bundle screenshot](docs/screenshots/incoming-bundles.png)
+[Disconnected import](docs/operator-guide.md#disconnected-import) ·
+[Incoming bundle screenshot](docs/screenshots/incoming-bundles.png) ·
+[Settings screenshot](docs/screenshots/settings.png)
 
 ## Bundled keys require approval
 
-Choose **Review bundled keys** to verify the archive and stage included keys as
-untrusted candidates. **Review bundled public key** shows the identity, full
-fingerprint, expiration, and source bundle. Verify the fingerprint independently,
-confirm it, and explicitly approve the key for its repository before importing.
+**Review & import** verifies the archive, then asks only about keys that are
+neither already approved for the repository nor already in this host's RPM
+keyring. The dialog shows each key's identity, expiration, and full fingerprint.
+Verify the fingerprint independently, confirm it, and approve the key before
+the import starts.
 
 ![Signing-key confirmation with the approval button disabled until explicit confirmation](docs/screenshots/signing-key-review.png)
 
@@ -116,25 +128,25 @@ Including a key in a bundle, inspecting an archive, and viewing a fingerprint do
 not grant trust. Existing approvals remain in effect. Imports pin approved keys;
 publication revalidates packages with those keys and carries them into client
 setup. Unsigned RPMs and invalid signatures are blocked. Bundled keys are not
-silently added to the host-wide RPM database.
+silently added to the host-wide RPM database. Keys supplied separately can be
+added under **Settings → Add a key manually**.
 
-[Signing-key workflow and trust model](docs/operator-guide.md#repository-signing-keys) ·
-[Untrusted candidate screenshot](docs/screenshots/bundled-key-candidates.png)
+[Signing-key workflow and trust model](docs/operator-guide.md#repository-signing-keys)
 
 ## Publish and configure clients
 
 The optional Apache publisher serves pinned snapshot repositories and reviewed
-public keys. **Client setup** provides a `.repo` file, public-key downloads, setup
-commands, and four paired automation downloads:
+public keys. **Clients** offers two paths: an **Ansible kit** (one `.zip`) for many
+hosts, or **manual** commands for one or two. The kit contains:
 
-| Download | Purpose |
+| File | Purpose |
 | --- | --- |
 | `configure-repos.yml` | Verify full key fingerprints, enroll approved keys, install the pinned repository file, and refresh metadata |
 | `security-updates.yml` | Check pinned key/configuration files and apply security updates from the selected repositories |
 | `inventory.ini` | Example inventory to replace with your approved client hosts |
 | `README-client-automation.txt` | Prerequisites, preview/apply commands, and rollout instructions |
 
-![Client automation downloads and preview commands, including the advisory-metadata prerequisite](docs/screenshots/client-automation.png)
+![Client setup with the Ansible kit and manual commands](docs/screenshots/client-automation.png)
 
 Playbooks run from your existing Ansible control node. They process one host at
 a time, stop on failure, keep package signature checks enabled, and do not reboot

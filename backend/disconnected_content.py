@@ -30,7 +30,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener, url2pathname
 import xml.etree.ElementTree as ET
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -136,6 +136,18 @@ def read_public_key_source(value):
     return public_key_blocks(raw.decode('ascii'))
 
 
+def explain_reposync_failure(log):
+    """Turn common reposync signature failures into an actionable message; None if unrecognized."""
+    unsigned = re.findall(r"Package (\S+\.rpm) is not signed", log)
+    if unsigned:
+        return (f"{len(set(unsigned))} packages in this repository are not signed (for example {unsigned[0]}). "
+                "Signed packages are required, so it can't be mirrored; choose a repository whose packages are all signed.")
+    if re.search(r"Public key for \S+ is not installed|GPG check FAILED|NOKEY", log):
+        return ("A package signature couldn't be checked because its signing key isn't available on this host. "
+                "Check the repository's gpgkey setting and import its key.")
+    return None
+
+
 class SignatureError(ValueError):
     def __init__(self, code, message, diagnostics):
         super().__init__("RPM signature validation: " + message)
@@ -170,6 +182,38 @@ def inspect_public_key(armor):
             "user_ids": [row[9] for row in rows if row[0] == "uid" and len(row) > 9],
             "expires": dt.datetime.fromtimestamp(expires, dt.timezone.utc).isoformat() if expires else None,
             "sha256": hashlib.sha256(armor.encode()).hexdigest(), "public_key": armor}
+
+
+def host_rpm_fingerprints():
+    """Full primary fingerprints in the host RPM keyring; empty if they cannot be read.
+
+    Used only to avoid prompting for keys the host already trusts. It never grants trust.
+    Each key is inspected separately: GnuPG stops reading a file at a key format it
+    does not support (for example, version 6 keys), which would hide the others.
+    """
+    env = {**os.environ, "LC_ALL": "C"}
+    try:
+        listed = subprocess.run(["/usr/bin/rpm", "-q", "gpg-pubkey", "--qf", "%{DESCRIPTION}\n"],
+                                capture_output=True, text=True, timeout=30, env=env)
+        if listed.returncode or "PRIVATE KEY" in listed.stdout:
+            return set()
+        blocks = re.findall(r"-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]*?-----END PGP PUBLIC KEY BLOCK-----", listed.stdout)[:64]
+        result = set()
+        with tempfile.TemporaryDirectory(prefix="dc-host-keys-") as temporary:
+            for index, block in enumerate(blocks):
+                path = Path(temporary) / f"{index}.asc"
+                path.write_text(block + "\n")
+                shown = subprocess.run(["/usr/bin/gpg2", "--no-options", "--homedir", temporary, "--batch",
+                    "--no-auto-key-retrieve", "--with-colons", "--fixed-list-mode", "--with-fingerprint",
+                    "--show-keys", str(path)], capture_output=True, text=True, timeout=30, env=env)
+                previous = ""
+                for row in (line.split(":") for line in shown.stdout.splitlines()):
+                    if row[0] == "fpr" and previous == "pub" and len(row) > 9 and FINGERPRINT.fullmatch(row[9]):
+                        result.add(row[9])
+                    previous = row[0]
+        return result
+    except (OSError, subprocess.SubprocessError):
+        return set()
 
 
 def repository_keys(repository):
@@ -789,7 +833,44 @@ class Engine:
             # Candidates are written only after the entire archive and every key pass integrity checks.
             for candidate in candidates:
                 write_json(self.root / 'bundle-key-candidates' / (candidate['candidate_id'] + '.json'), candidate)
-            return {"bundle_name": path.name, "keys": len(candidates), "trusted": False}
+        host = host_rpm_fingerprints() if candidates else set()
+        approved = {(rid, key["sha256"]) for rid in {c["repository_id"] for c in candidates} for key in self.trusted_keys(rid)}
+        summaries = []
+        for candidate in candidates:
+            summary = {"candidate_id": candidate["candidate_id"], "repository_id": candidate["repository_id"],
+                       "sha256": candidate["sha256"], "approved": (candidate["repository_id"], candidate["sha256"]) in approved}
+            try:
+                key = inspect_public_key(candidate["public_key"])
+                summary.update(fingerprint=key["fingerprint"], user_ids=key["user_ids"], expires=key["expires"],
+                               host_trusted=key["fingerprint"] in host)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                summary.update(fingerprint=None, host_trusted=False, error=str(error))
+            summaries.append(summary)
+        return {"bundle_name": path.name, "bundle_sha256": checksum, "keys": len(candidates),
+                "candidates": summaries, "trusted": False}
+
+    def bundle_info(self, data):
+        """Summarize the unverified manifest for display; imports verify everything again."""
+        if self.config.get("role") != "disconnected":
+            raise ValueError("Bundle details require the disconnected role")
+        if not isinstance(data, dict) or set(data) != {"bundle_name"}:
+            raise ValueError("Select one incoming bundle")
+        path = self.bundle_path(data["bundle_name"])
+        limit = int(self.config.get("max_import_gib", 200)) * GIB
+        with tarfile.open(path, "r|") as archive:
+            manifest, total = bundle_manifest(archive, limit, 200000)
+        count = lambda value: value if type(value) is int and value >= 0 else None
+        target = host_os()
+        return {"bundle_name": path.name, "bytes": path.stat().st_size, "content_bytes": total,
+                "snapshot_id": manifest["snapshot_id"],
+                "created": manifest["created"] if isinstance(manifest.get("created"), str) else None,
+                "os": {"major": manifest["os"]["major"], "arch": manifest["os"]["arch"]},
+                "matches_host": all(manifest["os"][k] == target[k] for k in ["major", "arch"]),
+                "repositories": {rid: {"packages": count(repo.get("packages")) if isinstance(repo, dict) else None,
+                                       "package_bytes": count(repo.get("package_bytes")) if isinstance(repo, dict) else None}
+                                 for rid, repo in manifest["repositories"].items()},
+                "signing_keys": {rid: len(entries) for rid, entries in manifest.get("signing_keys", {}).items()},
+                "verified": False}
 
     def key_files(self):
         try:
@@ -981,7 +1062,7 @@ class Engine:
         staging.mkdir(mode=0o700)
         destination = safe_path(public / "snapshots", sid)
         try:
-            self.update(job, stage="Revalidating source repositories and trusted RPM signatures")
+            self.update(job, step="validate", stage="Revalidating source repositories and trusted RPM signatures")
             inventory = {}
             for rid in snapshot["repositories"]:
                 repository = safe_path(source, f"repositories/{rid}")
@@ -992,7 +1073,7 @@ class Engine:
                         for rid, names in inventory.items() for name in names)
             if shutil.disk_usage(PUBLISH_ROOT).free < total + self.floor:
                 raise ValueError("Not enough free space for a public copy and the storage reserve")
-            self.update(job, stage="Copying indexed repository content to private publication staging")
+            self.update(job, step="copy", stage="Copying indexed repository content to private publication staging")
             for rid, names in inventory.items():
                 for name in names:
                     original = safe_path(source, f"repositories/{rid}/{name}")
@@ -1002,7 +1083,7 @@ class Engine:
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     shutil.copyfile(original, target)
                     os.chmod(target, 0o644)
-            self.update(job, stage="Verifying the public copy before exposing repository URLs")
+            self.update(job, step="verify", stage="Verifying the public copy before exposing repository URLs")
             checked = {}
             for rid in inventory:
                 checked[rid] = self.validate_content(staging / "repositories" / rid, rid,
@@ -1024,6 +1105,7 @@ class Engine:
                     if not path.is_file() or path.stat().st_size > KEY_LIMIT or digest(path) != key["sha256"]:
                         raise ValueError("Different or missing public signing key for this snapshot identifier")
             verified_at = now()
+            self.update(job, step="serve")
             for directory, _, _ in os.walk(staging):
                 os.chmod(directory, 0o755)
             repo_file = private / f"{job['id']}.repo"
@@ -1082,6 +1164,57 @@ class Engine:
             self.config = config
         return {"path": str(path), "updated_at": config["incoming_updated_at"]}
 
+    def export_directory(self):
+        """Where new bundles are written: the saved export folder, or private state by default."""
+        value = self.config.get("export_dir")
+        return self.root / "exports" if not value else self.incoming_directory(value)
+
+    def export_archive_path(self, record):
+        """Recorded archive path; records from before the export folder setting used private state."""
+        sid = record["snapshot_id"]
+        value = record.get("path")
+        if isinstance(value, str) and Path(value).is_absolute() and Path(value).name == f"{sid}.tar" and ".." not in Path(value).parts:
+            return Path(value)
+        return self.root / "exports" / f"{sid}.tar"
+
+    def save_export_settings(self, data):
+        if self.config.get("role") != "connected":
+            raise ValueError("Export settings require the connected installation role")
+        if not isinstance(data, dict) or set(data) != {"export_dir"} or not isinstance(data["export_dir"], str):
+            raise ValueError("Specify only the export folder")
+        default = data["export_dir"] in {"", str(self.root / "exports")}
+        path = self.root / "exports" if default else self.incoming_directory(data["export_dir"])
+        if not default:
+            if path == self.root or self.root in path.parents or path in self.root.parents:
+                raise ValueError("Choose a folder outside the private state directory, or reset to the default")
+            # Confirm root can create files there without leaving anything behind.
+            fd, name = tempfile.mkstemp(prefix=".dc-write-test-", dir=path)
+            os.close(fd)
+            os.unlink(name)
+        with self.lock():
+            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+                raise ValueError("Wait for the active job to finish before changing the export folder")
+            config = read_json(CONFIG)
+            if default:
+                config.pop("export_dir", None)
+            else:
+                config["export_dir"] = str(path)
+            config["export_updated_at"] = now()
+            write_json(CONFIG, config)
+            self.config = config
+        return {"path": str(path), "default": default, "updated_at": config["export_updated_at"]}
+
+    def export_settings(self):
+        default = not self.config.get("export_dir")
+        result = {"path": self.config.get("export_dir") or str(self.root / "exports"), "default": default,
+                  "updated_at": self.config.get("export_updated_at"), "available": False}
+        try:
+            path = self.export_directory()
+            result.update(path=str(path), available=True, free=shutil.disk_usage(path).free)
+        except (OSError, ValueError) as error:
+            result["error"] = str(error)
+        return result
+
     def directory_locations(self):
         locations = {}
 
@@ -1096,7 +1229,10 @@ class Engine:
             except (OSError, ValueError):
                 pass  # Unmounted media and absent optional shortcut directories are omitted.
 
-        add(self.config.get("incoming_dir", str(self.root / "incoming")), "Saved bundle source")
+        if self.config.get("role") == "connected":
+            add(self.config.get("export_dir", str(self.root / "exports")), "Saved export folder")
+        else:
+            add(self.config.get("incoming_dir", str(self.root / "incoming")), "Saved bundle source")
         add("/", "Filesystem root")
         for path in ["/mnt", "/media", "/run/media"]:
             add(path, path)
@@ -1114,8 +1250,8 @@ class Engine:
         return list(locations.values())
 
     def browse_directories(self, data):
-        if self.config.get("role") != "disconnected":
-            raise ValueError("Directory browsing requires the disconnected installation role")
+        if self.config.get("role") not in {"connected", "disconnected"}:
+            raise ValueError("Directory browsing requires a configured installation role")
         if not isinstance(data, dict) or set(data) != {"path"} or not isinstance(data["path"], str):
             raise ValueError("Specify only an absolute directory path to browse")
         path = self.incoming_directory(data["path"])
@@ -1192,12 +1328,13 @@ class Engine:
             if (job.get("operation") != "export" or job.get("status") != "succeeded"
                     or not isinstance(sid, str) or not ID.fullmatch(sid) or sid in records
                     or not re.fullmatch(r"[a-f0-9]{64}", result.get("sha256", ""))
-                    or result.get("path") != str(self.root / "exports" / f"{sid}.tar")):
+                    or not isinstance(result.get("path"), str)
+                    or self.export_archive_path({"snapshot_id": sid, "path": result["path"]}) != Path(result["path"])):
                 continue
             record = {"snapshot_id": sid, "exported_at": job.get("finished", job["created"]),
                       "verified_at": result.get("verified_at", job.get("finished")),
                       "job_id": job["id"], "sha256": result["sha256"], "bytes": result["bytes"],
-                      "files_verified": result.get("files_verified"), "fingerprint": None}
+                      "files_verified": result.get("files_verified"), "fingerprint": None, "path": result["path"]}
             path = self.root / "export-records" / f"{sid}.json"
             with self.lock():
                 if path.exists():
@@ -1211,7 +1348,7 @@ class Engine:
         sid = record["snapshot_id"]
         if not ID.fullmatch(sid):
             raise ValueError("Invalid export snapshot identifier")
-        path = self.root / "exports" / f"{sid}.tar"
+        path = self.export_archive_path(record)
         sidecar = path.with_suffix(".tar.sha256")
         summary = {**record, "path": str(path), "checksum_path": str(sidecar),
                    "state": "missing", "reason": "Archive or checksum file is missing"}
@@ -1250,7 +1387,7 @@ class Engine:
         last_preflight = next((j for j in jobs if j.get("operation") == "preflight"
                                and j.get("profile") == profile), None)
         relevant = next((j for j in jobs if (
-            j.get("operation") == "sync" and set(j.get("profile", {}).get("repositories", [])) == selection
+            j.get("operation") in {"sync", "sync-export"} and set(j.get("profile", {}).get("repositories", [])) == selection
             or j is last_preflight and j["status"] in {"failed", "cancelled", "interrupted"}
             or matching and j.get("operation") in {"export", "verify-export"} and j.get("snapshot_id") == matching["id"])), None)
         plan_job = next((j for j in jobs if j.get("plan") and j.get("profile") == profile), None)
@@ -1262,6 +1399,8 @@ class Engine:
             phase, action, reason = "failed", relevant["operation"], relevant["stage"]
             if action == "verify-export":
                 action = "export"  # A failed integrity check needs a fresh bundle, not an endless retry.
+            elif action == "sync-export" and matching and relevant.get("snapshot_id") == matching["id"]:
+                action = "export"  # The sync completed; only the bundle needs another attempt.
             # A later successful export/verification record can outlive its job.
             if bundle and bundle["state"] == "available" and bundle["verified_at"] > relevant.get("finished", relevant["created"]):
                 phase, action, reason = "ready", None, "The verified bundle is available for your approved transfer process."
@@ -1351,7 +1490,10 @@ class Engine:
             else:
                 phase, reason = "waiting", "No transfer bundles were found. Stage an archive and its matching checksum in the saved source folder."
         attention = None
-        if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"}:
+        # A failed import stops demanding attention once its file is gone from the transfer folder.
+        removed = (attempt and attempt.get("operation") == "import" and attempt.get("bundle_name")
+                   and attempt["bundle_name"] not in {b["name"] for b in incoming})
+        if attempt and attempt["status"] in {"failed", "cancelled", "interrupted"} and not removed:
             milestone = max(latest["created"] if latest else "", current["published_at"] if current else "")
             if attempt.get("finished", attempt["created"]) > milestone:
                 phase, reason, attention = "failed", attempt["stage"], attempt
@@ -1392,6 +1534,7 @@ class Engine:
                 "trusted_signing_keys": [read_json(p) for p in sorted((self.root / "trusted-keys").glob("*.json"))],
                 "publication": publication, "disconnected": disconnected,
                 "connected": connected,
+                "export_settings": self.export_settings() if self.config.get("role") == "connected" else None,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
 
@@ -1451,7 +1594,7 @@ class Engine:
         write_json(self.root / "import-records" / f"{job['id']}.json", record)
 
     def start(self, operation, snapshot_id=None):
-        if operation not in {"preflight", "sync", "export", "verify-export", "import", "publish"}:
+        if operation not in {"preflight", "sync", "sync-export", "export", "verify-export", "import", "publish"}:
             raise ValueError("Unknown operation")
         if operation in {"import", "publish"}:
             if self.config.get("role") != "disconnected":
@@ -1466,7 +1609,7 @@ class Engine:
             if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
                 raise ValueError("Another job is active; wait for it to finish or stop it")
             profile = self.profile()
-            if operation in {"preflight", "sync"}:
+            if operation in {"preflight", "sync", "sync-export"}:
                 self.save_profile_unlocked_validate(profile)
             if operation in {"export", "verify-export", "publish"}:
                 if not snapshot_id or not ID.fullmatch(snapshot_id):
@@ -1506,7 +1649,7 @@ class Engine:
         if path.stat().st_size > limit + GIB:
             raise ValueError("Transfer archive exceeds the import size limit")
         expected = self.expected_archive_checksum(path)
-        self.update(job, stage="Verifying transferred archive against its SHA-256 sidecar")
+        self.update(job, step="checksum", stage="Verifying transferred archive against its SHA-256 sidecar")
         checksum = digest(path)
         if expected != checksum:
             raise ValueError("Transfer checksum mismatch; archive was not imported")
@@ -1535,9 +1678,9 @@ class Engine:
         staging = self.root / ".imports" / job["id"]
         staging.mkdir(mode=0o700)
         try:
-            self.update(job, stage="Checking archive members and extracting to private staging")
+            self.update(job, step="extract", stage="Checking archive members and extracting to private staging")
             verified = verify_archive(path, extract_to=staging, max_bytes=limit, reserve_bytes=self.floor)
-            self.update(job, stage="Revalidating repository metadata and trusted RPM signatures")
+            self.update(job, step="validate", stage="Revalidating repository metadata and trusted RPM signatures")
             checked = {}
             for rid in manifest["repositories"]:
                 checked[rid] = self.validate_content(staging / "repositories" / rid, rid)
@@ -1589,19 +1732,25 @@ class Engine:
                     raise ValueError(f"{stage} failed (exit {process.returncode}); inspect job logs")
 
     def estimate(self, profile, job):
-        self.update(job, stage="Resolving repository sizes; refreshing metadata if needed")
-        args = ["/usr/bin/dnf", "-q", "--disablerepo=*"]
+        self.update(job, step="space", stage="Resolving repository sizes; refreshing metadata if needed")
+        # Host include/exclude filters shape this host's own updates; mirrors keep complete repositories.
+        args = ["/usr/bin/dnf", "-q", "--disableexcludes=all", "--disablerepo=*"]
         args += [f"--enablerepo={r}" for r in profile["repositories"]]
-        args += ["repoquery", "--available", "--show-duplicates", "--disable-modular-filtering", "--qf", "%{downloadsize}"]
-        # stderr is local-only; stdout contains just declared RPM byte sizes.
+        args += ["repoquery", "--available", "--show-duplicates", "--disable-modular-filtering", "--qf", "%{repoid} %{downloadsize}"]
+        # stderr is local-only; stdout contains just repository IDs and declared RPM byte sizes.
         with (self.root / "jobs" / f"{job['id']}.log").open("ab") as log:
             result = subprocess.run(args, capture_output=True, text=True, check=False, timeout=900)
             log.write(result.stderr.encode())
         if result.returncode:
             raise ValueError("Cannot query repository sizes; inspect job logs")
-        sizes = [int(line) for line in result.stdout.splitlines() if line.strip().isdigit()]
-        if not sizes:
-            raise ValueError("Selected repositories returned no package sizes")
+        sizes, found = [], set()
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                found.add(parts[0]); sizes.append(int(parts[1]))
+        empty = [rid for rid in profile["repositories"] if rid not in found]
+        if empty:
+            raise ValueError(f"No packages to mirror in {', '.join(empty)}; remove {'it' if len(empty) == 1 else 'them'} from the selection")
         size = sum(sizes)
         available = shutil.disk_usage(self.root).free
         # Allow metadata and working overhead; leave enough room for a full tar export.
@@ -1617,22 +1766,32 @@ class Engine:
     def sync(self, job):
         profile = job["profile"]
         plan = self.estimate(profile, job)
-        if not plan["within_budget"] or not plan["enough_space"]:
-            raise ValueError("Preflight exceeds the snapshot budget or available storage; no RPM sync started")
+        if not plan["within_budget"]:
+            raise ValueError(f"The selection has {plan['package_bytes'] / GIB:.1f} GiB of packages, over the {profile['max_gib']} GiB size limit; "
+                             "no RPM sync started. Select fewer repositories or raise the limit.")
+        if not plan["enough_space"]:
+            raise ValueError(f"The selection needs {plan['required_free'] / GIB:.1f} GiB free, but {plan['free_bytes'] / GIB:.1f} GiB is available; "
+                             "no RPM sync started")
         sid = job["id"]
         snapshot_dir = self.root / "snapshots" / sid
         content = snapshot_dir / "repositories"
         content.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.update(job, snapshot_id=sid)
-        args = ["/usr/bin/dnf", "-y", "--disablerepo=*"]
+        self.update(job, snapshot_id=sid, step="download")
+        args = ["/usr/bin/dnf", "-y", "--disableexcludes=all", "--disablerepo=*"]
         for rid in profile["repositories"]:
             args += [f"--enablerepo={rid}", f"--setopt={rid}.gpgcheck=1"]
         args += ["reposync", "--download-metadata", "--gpgcheck", "--download-path", str(content)]
-        self.run_command(args, job, "Downloading repository packages and original metadata")
-        self.update(job, stage="Verifying metadata, referenced packages, and RPM signatures")
+        try:
+            self.run_command(args, job, "Downloading repository packages and original metadata")
+        except ValueError as error:
+            raise ValueError(explain_reposync_failure(self.logs(job["id"])["text"]) or str(error)) from None
+        self.update(job, step="validate", stage="Verifying metadata, referenced packages, and RPM signatures")
         checked = {}
         for rid in profile["repositories"]:
-            checked[rid] = validate_repository(content / rid, require_updateinfo=("baseos" in rid or "appstream" in rid))
+            try:
+                checked[rid] = validate_repository(content / rid, require_updateinfo=("baseos" in rid or "appstream" in rid))
+            except ValueError as error:
+                raise ValueError(f"{rid}: {error}") from None
         snapshot = {"id": sid, "created": now(), "status": "validated", "os": host_os(),
                     "repositories": checked, "package_bytes": sum(r["package_bytes"] for r in checked.values())}
         write_json(snapshot_dir / "snapshot.json", snapshot)
@@ -1642,7 +1801,7 @@ class Engine:
         sid = job["snapshot_id"]
         snapshot_dir = self.root / "snapshots" / sid
         snapshot = read_json(snapshot_dir / "snapshot.json")
-        self.update(job, stage="Revalidating snapshot before export")
+        self.update(job, step="bundle", stage="Revalidating snapshot before export")
         for rid in snapshot["repositories"]:
             validate_repository(snapshot_dir / "repositories" / rid,
                                 require_updateinfo=("baseos" in rid or "appstream" in rid))
@@ -1681,15 +1840,16 @@ class Engine:
                 raise ValueError("Snapshot content conflicts with the bundled public-key directory")
             files[name] = {'size': len(raw_key), 'sha256': hashlib.sha256(raw_key).hexdigest()}
         required += sum(len(raw_key) for raw_key in key_payloads.values())
-        if shutil.disk_usage(self.root).free < required:
-            raise ValueError("Not enough free space for the complete export and storage reserve")
+        destination = self.export_directory()
+        if shutil.disk_usage(destination).free < required:
+            raise ValueError(f"Not enough free space in {destination} for the complete export and storage reserve")
         manifest = {"format": "disconnected-content/v1", "snapshot_id": sid, "created": now(),
                     "os": snapshot["os"], "repositories": snapshot["repositories"], "files": files,
                     "authentication": "unsigned-prototype"}
         manifest['signing_keys'] = bundled_keys
         import io
         raw = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
-        dest = self.root / "exports" / f"{sid}.tar"
+        dest = destination / f"{sid}.tar"
         partial = dest.with_suffix(".tar.partial")
         self.update(job, stage="Writing transfer archive")
         with tarfile.open(partial, "w") as archive:
@@ -1709,30 +1869,31 @@ class Engine:
                 info.uname = info.gname = ""
                 with path.open("rb") as stream:
                     archive.addfile(info, stream)
-        self.update(job, stage="Verifying every archived file before completing export")
+        self.update(job, step="verify", stage="Verifying every archived file before completing export")
         verified = verify_archive(partial)
         checksum = digest(partial)
         os.replace(partial, dest)
         sidecar = dest.with_suffix(".tar.sha256")
         sidecar.write_text(f"{checksum}  {dest.name}\n")
-        self.record_export(sid, job["id"], verified, checksum, exported_at=now())
+        self.record_export(sid, job["id"], verified, checksum, exported_at=now(), path=dest)
         self.update(job, result={"path": str(dest), "sha256": checksum, "bytes": dest.stat().st_size, **verified})
 
-    def record_export(self, sid, job_id, verified, checksum, exported_at=None):
-        path = self.root / "exports" / f"{sid}.tar"
+    def record_export(self, sid, job_id, verified, checksum, exported_at=None, path=None):
         record_path = self.root / "export-records" / f"{sid}.json"
         with self.lock():
             previous = read_json(record_path) if record_path.exists() else {}
+            path = path or self.export_archive_path({**previous, "snapshot_id": sid})
             record = {"snapshot_id": sid, "exported_at": exported_at or previous.get("exported_at"),
                       "verified_at": verified["verified_at"], "job_id": previous.get("job_id", job_id) if not exported_at else job_id,
                       "verification_job_id": job_id, "sha256": checksum, "bytes": path.stat().st_size,
                       "bundled_signing_keys": verified.get('bundled_signing_keys', 0),
-                      "files_verified": verified["files_verified"], "fingerprint": self.fingerprint(path)}
+                      "files_verified": verified["files_verified"], "fingerprint": self.fingerprint(path), "path": str(path)}
             write_json(record_path, record)
 
     def verify_export(self, job):
         sid = job["snapshot_id"]
-        path = self.root / "exports" / f"{sid}.tar"
+        record_path = self.root / "export-records" / f"{sid}.json"
+        path = self.export_archive_path(read_json(record_path) if record_path.is_file() else {"snapshot_id": sid})
         sidecar = path.with_suffix(".tar.sha256")
         if path.is_symlink() or sidecar.is_symlink() or not path.is_file() or not sidecar.is_file():
             raise ValueError("Archive and checksum must both be present as regular files; rebuild the transfer bundle")
@@ -1746,7 +1907,7 @@ class Engine:
         previous = self.export_records(self.jobs()).get(sid)
         if previous and previous["sha256"] != checksum:
             raise ValueError("Archive differs from the last successful export; rebuild the transfer bundle")
-        self.record_export(sid, job["id"], verified, checksum)
+        self.record_export(sid, job["id"], verified, checksum, path=path)
         self.update(job, result={"path": str(path), "sha256": checksum, "bytes": path.stat().st_size, **verified})
 
     def run(self, jid):
@@ -1763,6 +1924,11 @@ class Engine:
                 self.update(job, result=self.estimate(job["profile"], job))
             elif job["operation"] == "sync":
                 self.sync(job)
+            elif job["operation"] == "sync-export":
+                self.sync(job)
+                synced = job["result"]
+                self.export(job)
+                self.update(job, result={**synced, **job["result"]})
             elif job["operation"] == "export":
                 self.export(job)
             elif job["operation"] == "verify-export":
@@ -1796,7 +1962,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "client-automation", "scan-bundle-keys", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "client-automation", "scan-bundle-keys", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "save-export-settings", "browse-directories", "bundle-info", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -1810,7 +1976,7 @@ def main():
         result = engine.status()
     elif args.command == "client-automation":
         result = engine.client_automation(args.argument)
-    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "browse-directories", "scan-bundle-keys", "review-signing-key", "trust-signing-key"}:
+    elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "save-export-settings", "browse-directories", "bundle-info", "scan-bundle-keys", "review-signing-key", "trust-signing-key"}:
         limit = 128 * 1024 if args.command == "review-signing-key" else 16384
         raw = sys.stdin.read(limit + 1)
         if len(raw) > limit:
@@ -1828,6 +1994,10 @@ def main():
             result = engine.save_import_settings(data)
         elif args.command == "save-publication-settings":
             result = engine.save_publication_settings(data)
+        elif args.command == "save-export-settings":
+            result = engine.save_export_settings(data)
+        elif args.command == "bundle-info":
+            result = engine.bundle_info(data)
         else:
             result = engine.browse_directories(data)
     elif args.command == "start":

@@ -45,6 +45,6 @@ for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'chan
             'repositories': [{'id': 'example-baseos', 'name': 'RHEL 10 BaseOS', 'enabled': True},
                              {'id': 'example-appstream', 'name': 'RHEL 10 AppStream', 'enabled': False}],
             'profile': app.profile(), 'jobs': jobs, 'snapshots': snapshots, 'incoming': [],
-            'import_source': None, 'publication': None, 'connected': connected,
+            'import_source': None, 'publication': None, 'connected': connected, 'export_settings': app.export_settings(),
             'capabilities': {'allow_unsigned_imports': False}}).replace(temporary, '/var/lib/disconnected-content'))
 print(json.dumps(states))

@@ -156,7 +156,7 @@ class JobsAndExports(unittest.TestCase):
 
     def test_over_budget_sync_stops_before_downloading(self):
         job = {"id": "a" * 32, "profile": self.app.profile()}
-        with patch.object(self.app, "estimate", return_value={"within_budget": False, "enough_space": True}), \
+        with patch.object(self.app, "estimate", return_value={"within_budget": False, "enough_space": True, "package_bytes": 2 * engine.GIB}), \
                 patch.object(self.app, "run_command") as run:
             with self.assertRaisesRegex(ValueError, "no RPM sync started"):
                 self.app.sync(job)

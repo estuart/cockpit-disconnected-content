@@ -1,8 +1,8 @@
 # Downloadable client automation
 
-The **Client setup → Ansible client automation** section provides four downloads
-after a snapshot has been published (introduced in version 0.6 and moved to its
-own tab in version 0.8):
+**Clients → Ansible → Download Ansible kit (.zip)** provides four files after a
+snapshot has been published. They can also be downloaded individually under
+**Download files individually or preview them**:
 
 | Download | Purpose |
 | --- | --- |
