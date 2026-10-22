@@ -21,7 +21,7 @@ that role; hiding UI tabs is not the access-control mechanism.
 
 Prebuilt GitHub releases are not currently published. Build with
 [the development guide](development.md) or obtain RPMs from an approved build
-process. The examples below use version 0.10.0, release 1 for RHEL 10. Adjust the
+process. The examples below use version 0.11.0, release 1 for RHEL 10. Adjust the
 filenames to the exact artifacts you built. The two packages must match.
 
 Install the main package explicitly. Avoid a wildcard such as
@@ -35,7 +35,7 @@ DNF must already have repository access and the necessary trusted package-signin
 keys. The application does not register the system or obtain subscription rights.
 
 ```sh
-sudo dnf install ./cockpit-disconnected-content-0.10.0-1.el10.noarch.rpm
+sudo dnf install ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm
 sudoedit /etc/disconnected-content/config.json
 ```
 
@@ -75,15 +75,15 @@ installer for Cockpit, this extension, or its runtime dependencies.
 For import without HTTP publication:
 
 ```sh
-sudo dnf install ./cockpit-disconnected-content-0.10.0-1.el10.noarch.rpm
+sudo dnf install ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm
 ```
 
 For import and HTTP publication:
 
 ```sh
 sudo dnf install \
-  ./cockpit-disconnected-content-0.10.0-1.el10.noarch.rpm \
-  ./cockpit-disconnected-content-publisher-0.10.0-1.el10.noarch.rpm
+  ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm \
+  ./cockpit-disconnected-content-publisher-0.11.0-1.el10.noarch.rpm
 ```
 
 Edit `/etc/disconnected-content/config.json` before the first operation:
@@ -105,13 +105,13 @@ mandatory; this setting never bypasses package signature validation.
 
 Apply the same configuration ownership, permissions, and `cockpit.socket` setup
 shown for the connected host. Open `https://disconnected.example.org:9090`.
-Confirm the UI shows **Disconnected side** and the status output reports the
+Confirm the UI shows **Disconnected host** and the status output reports the
 expected role and storage directory before starting work.
 
-Select the transfer directory in **Incoming bundles → Browse folders**, then
-**Save & scan**. Mounting media and copying files are separate administrator
-operations. Use **Review bundled keys** before the first import from a repository
-whose key has not yet been approved.
+Choose the transfer directory in **Settings → Transfer folder → Browse…**; picking
+a folder saves it. Mounting media and copying files are separate administrator
+operations. **Review & import** asks you to approve any bundled key that isn't
+already approved or trusted by this host before the import starts.
 
 ### Offline dependencies
 
@@ -149,8 +149,8 @@ Allow capacity for:
 The budget and reserve checks are estimates and guardrails, not quotas. Keep
 headroom for concurrent workloads and retained older snapshots.
 
-To publish, install the optional publisher, save the client-facing server URL in
-**Publish content**, and explicitly publish a validated snapshot. The application
+To publish, install the optional publisher, save the client-facing address when the
+overview asks (or in **Settings**), and explicitly publish a validated snapshot. The application
 checks Apache configuration, applies web-content SELinux labels, and starts Apache
 when publishing. It does not open firewall ports or change network isolation.
 Allow inbound HTTP from approved client networks through your existing policy.

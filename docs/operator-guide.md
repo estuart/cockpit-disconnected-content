@@ -6,26 +6,46 @@ package counts, signing keys, timestamps, and storage values come from your host
 
 ## Connected cycle
 
-The connected **Overview** is an operations dashboard. It shows the last
-successful sync and export with relative ages and exact local timestamps, a
-recommended next action, the saved selection's workflow, per-repository sync and
-export status, a matching size check, recent activity, and available storage.
+The connected **Overview** shows one next action, a three-step progress bar
+(**Choose repositories → Sync & build bundle → Transfer both files**), the selected
+repositories with package counts and sync ages, and available storage.
 
-1. Select repositories in **Repositories**, set a budget, and save the profile.
-2. Run **Check saved selection size** and inspect the timestamped result.
-3. Run **Sync saved selection**. The workflow shows the operation's stage and
-   elapsed time; jobs continue in a system service if the browser is closed.
-4. Use **Build & verify transfer bundle** when the saved selection has a validated
-   snapshot. A new sync never inherits an older snapshot's export status.
-5. Open **Snapshots & exports** or **Show transfer files** for archive and checksum
-   paths, creation and verification times, file availability, and detailed evidence.
-6. Carry the `.tar` and matching `.tar.sha256` through the approved transfer process.
-   The connected host does not claim that transfer or disconnected import succeeded.
+![Connected overview with a verified bundle ready to transfer](screenshots/connected-dashboard.png)
 
-Dashboard actions use the saved selection. Unsaved edits remain in the repository
-form until saved. Sync times describe when content was captured, not whether newer
-upstream packages exist. Size results are scoped to the saved selection and budget;
-each sync checks capacity again. **Activity & evidence** retains detailed job logs.
+1. Select repositories in **Repositories**. Each change saves immediately. The
+   summary panel shows the last size check for the saved selection; choose
+   **Check size** for a fresh estimate.
+2. Choose **Sync & build bundle**. One job checks free space, downloads packages
+   and original metadata, validates metadata and RPM signatures, then builds and
+   verifies the transfer bundle. Progress shows the current step; the job
+   continues in a system service if the browser is closed.
+3. When the bundle is ready, the overview shows the `.tar` and `.tar.sha256`
+   paths with **Copy path** buttons. Carry both files through the approved
+   transfer process. The connected host does not claim that transfer or
+   disconnected import succeeded.
+
+**Settings** holds the export folder (where new bundles and checksum files are
+written, such as a mounted transfer drive) and the per-snapshot size limit. The
+folder must be a real directory without symlinks, outside private state, and
+writable by root; choosing one with **Browse…** saves it. Existing bundles stay
+where they were written, and their records keep that path. If the folder becomes
+unavailable, exports stop with a clear message until it is mounted again.
+
+Mirrors always contain the complete repository. Package filters in the host's own
+repository files (`includepkgs`, `excludepkgs`) are ignored during size checks and
+downloads (`--disableexcludes=all`); they continue to apply to the host's updates.
+Repositories that contain unsigned packages cannot be mirrored, and the failure
+names an example package. HTTPS certificates are always verified; for a private
+certificate authority, add the CA to the system trust store with `update-ca-trust`.
+
+If the bundle step fails after a successful sync, the retry rebuilds only the
+bundle. The **⋮** menu next to a ready bundle can verify it again, rebuild it, or
+check repository sizes. **Older snapshots** at the bottom of the overview lists
+earlier content with its bundle state. Sync times describe when content was
+captured, not whether newer upstream packages exist. **Activity** retains each
+job's timestamps, results, and command output.
+
+![Repository selection with automatic saving](screenshots/connected-repositories.png)
 
 Export records persist independently of the recent 50 jobs returned to the UI.
 Older successful export jobs are migrated without changing their export dates;
@@ -56,35 +76,46 @@ are excluded from the collected key payload. Export fails clearly if a configure
 key source cannot be collected. Repositories with no configured key source include
 no key; existing host trust or separately supplied public keys remain available.
 
-On the disconnected side, choose **Incoming bundles → Review bundled keys**.
+On the disconnected side, bundles that include keys say so before import. Choose
+**Review & import**:
 
-![Incoming transfer bundles and key inspection](screenshots/incoming-bundles.png)
-The app verifies the archive sidecar and every declared file checksum, then stages
-the included keys as **Untrusted candidates**. Select **Review bundled public key**
-to see the full fingerprint and confirm approval. Inspecting the archive and
-viewing a key never enroll it. Previously approved keys remain approved; bundled
-copies do not overwrite existing trust. The manifest includes repository-to-key
-paths and SHA-256 values, with no trust or approval assertion. Older bundles
-without key entries remain supported. Rebuild an export to include the new keys;
-existing transfer files do not gain keys retroactively.
+![Incoming transfer bundles](screenshots/incoming-bundles.png)
 
-![Public-key candidates awaiting explicit approval](screenshots/bundled-key-candidates.png)
+1. The app verifies the archive sidecar and every declared file checksum, then
+   stages the included keys as untrusted candidates. Inspecting the archive never
+   enrolls a key.
+2. Keys already approved for that repository, and keys whose full fingerprint is
+   already in this host's RPM keyring, are not shown again. The host-keyring check
+   only decides whether to ask; it does not grant trust.
+3. For each remaining key, the dialog shows its identity, expiration, and full
+   fingerprint. Verify the fingerprint against an approved vendor source or
+   trusted record, confirm the checkbox, and choose **Approve & import** (or
+   **Approve & continue** when more keys follow). The review expires after 15
+   minutes. **Skip this key** leaves it unapproved; the import fails if any
+   package needs it. **Cancel** approves nothing and starts nothing.
+4. The import starts after the last decision. A bundle without keys imports in
+   one click.
+
+![Signing-key confirmation with approval disabled until explicit confirmation](screenshots/signing-key-review.png)
+
+Previously approved keys remain approved; bundled copies do not overwrite existing
+trust. The manifest includes repository-to-key paths and SHA-256 values, with no
+trust or approval assertion. Older bundles without key entries remain supported.
+Rebuild an export to include keys; existing transfer files do not gain keys
+retroactively.
 
 For third-party or internal content with a separately supplied public key, use
-**Signing keys** on the disconnected host:
+**Settings → Approved signing keys → Add a key manually**:
 
-1. Place one ASCII-armored public key (`.asc`, `.key`, or `.pub`, at most 64 KiB)
-   in the saved transfer folder and scan again, or select a file on your computer
-   or paste its contents. Keys are never fetched from the internet by the importer.
-2. Specify the exact repository ID from the incoming bundle or failed import.
-   Choose **Review public key** to see its identity, full fingerprint, expiration,
-   and key-file SHA-256. Review does not grant trust.
-3. Verify the full fingerprint against an approved vendor source or trusted record.
-   Confirm the checkbox and choose **Approve signing key** within 15 minutes.
-   Changing the repository or supplied key invalidates the displayed review.
-4. Return to **Incoming bundles** and retry the import. A missing key is reported
-   separately from unsigned RPMs, invalid signatures, and other verification errors.
-   RPM diagnostics are retained in **Activity & evidence**.
+1. Enter the exact repository ID. Choose a public-key file in the transfer folder
+   (`.asc`, `.key`, or `.pub`, at most 64 KiB), select one on your computer, or
+   paste its contents. Keys are never fetched from the internet by the importer.
+2. Choose **Review key** to see its identity, full fingerprint, and expiration.
+   Review does not grant trust. Changing the repository or key clears the review.
+3. Verify the full fingerprint, confirm the checkbox, and choose **Approve key**.
+4. Import the bundle again. A missing key is reported separately from unsigned
+   RPMs, invalid signatures, and other verification errors. RPM diagnostics are
+   retained in **Activity**.
 
 Approval is an administrative action scoped to the repository inside the extension.
 Validation uses an isolated RPM database containing only that repository's approved
@@ -97,8 +128,8 @@ and approval timestamps in snapshot evidence. Publication rechecks RPM signature
 with the pinned keys and serves the exact public key files under
 `/disconnected-content/snapshots/<snapshot-id>/keys/<fingerprint>.asc`.
 The generated `.repo` references dedicated local files in `/etc/pki/rpm-gpg/`.
-**Client setup** provides public-key downloads, published URLs, fingerprints,
-checksums, and manual setup commands. Review the fingerprints and checksum results
+**Clients** lists the keys clients will trust and provides manual setup commands
+that check each key's SHA-256 and fingerprint, plus key downloads. Review the fingerprints and checksum results
 before enrolling keys; do not treat the download server as an independent trust anchor.
 
 The paired `configure-repos.yml` embeds those exact public keys and enrolls them
@@ -113,18 +144,16 @@ without reviewed keys retain the independently provisioned Red Hat key file.
 
 ## Disconnected import
 
-The disconnected **Overview** follows **Choose source → Import & validate →
-Publish content → Configure clients**. It shows independent import/publication
-ages, the next action, pending inbox files, imported repository status, local
-publication availability, and recent activity. Client setup remains a manual
-step and is never marked complete because files were downloaded.
+The disconnected **Overview** follows **Import → Publish → Configure clients**.
+It shows one next action, what clients are currently served, and the transfer
+folder's status. **Content** lists incoming bundles and imported snapshots,
+**Clients** holds setup downloads for the current publication, and **Settings**
+holds the transfer folder, client-facing address, publisher status, approved keys,
+and the import policy. Client setup is never marked complete because files were
+downloaded. Unmounted transfer media does not block using content that is
+already imported and published.
 
-**Publish content** holds web-server settings and the explicit snapshot
-publication action. **Client setup** contains the recorded publication's `.repo`
-file, setup commands, paired Ansible playbooks, inventory, and instructions.
-Changing the saved server URL requires reviewing and republishing; draft edits
-are not saved by dashboard navigation. Unmounted transfer media does not block
-using content that is already imported and published.
+![Disconnected overview with published content ready for clients](screenshots/disconnected-dashboard.png)
 
 Install the application and its runtime dependencies before isolating the host,
 or provide them through an approved offline bootstrap repository. The importer
@@ -147,23 +176,26 @@ explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
 administrator. This does not authenticate the manifest; RPM signatures are still
 required and validated against approved repository keys or the existing host keyring.
 
-1. Open **Incoming bundles**, choose **Browse folders**, and navigate to the
-   transfer folder on the disconnected host. Mounted drives appear under
-   **Mounted filesystems**; **Quick locations** includes the saved source,
-   filesystem root, and existing common mount directories. Use breadcrumbs,
-   **Up one folder**, and the folder filter to navigate, then choose
-   **Use this folder**. You can also enter an absolute path directly.
-2. Choose **Save & scan** to persist the source. Stage the `.tar` and matching
-   `.tar.sha256` there using the approved transfer process, then **Scan now**.
-   The source must be a real directory without symlink components. Only that
-   directory is scanned; subdirectories are not searched. Browsing and choosing
-   a folder do not change the saved source until **Save & scan** is selected.
-   Mounting media and transferring files are currently administrator tasks
-   outside the application.
-3. Choose **Import bundle**. The application never imports automatically.
-4. Follow the job under **Activity & evidence**. A failed import leaves no usable
-   snapshot and removes its private extraction staging directory.
-5. Open **Snapshots** for validation results and local `file://` repository URLs.
+1. Open **Settings → Transfer folder → Browse…** and navigate to the transfer
+   folder on the disconnected host. Mounted drives appear under **Mounted
+   filesystems**; **Quick locations** includes the saved source, filesystem
+   root, and existing common mount directories. Choose **Use this folder** to
+   save it. You can also type an absolute path and choose **Save**.
+2. Stage the `.tar` and matching `.tar.sha256` there using the approved transfer
+   process. The page checks the folder automatically. The source must be a real
+   directory without symlink components, and only that directory is scanned.
+   Mounting media and transferring files are administrator tasks outside the
+   application.
+3. Choose **Import** or **Review & import** on the overview or **Content**. The
+   application never imports automatically. The overview shows progress.
+4. A failed import leaves no usable snapshot and removes its private extraction
+   staging directory. **Activity** retains the stage and diagnostics.
+5. **Content → Snapshots** lists validation results; expand **Repository details
+   and local paths** for local `file://` repository URLs.
+
+The bundle card's repository count, build time, and key count come from the
+unverified manifest and are for display only. Every import verifies the archive
+and its contents again.
 
 The importer checks the outer checksum, manifest schema, size/file-count limits,
 safe paths, file checksums, RHEL major version, architecture, repository metadata,
@@ -195,17 +227,16 @@ Install the optional `cockpit-disconnected-content-publisher` RPM and its Apache
 dependencies on the disconnected host before isolation or from an offline
 bootstrap repository. Connected sync hosts do not need this subpackage.
 
-1. Open **Publish content**, enter the server URL clients can reach, such as
-   `http://mirror.example.org`, and select **Save server URL**.
-2. Select an imported, validated snapshot and choose **Publish snapshot**. This
-   creates a separate copy of indexed repository metadata and RPMs under
-   `/var/www/disconnected-content/public/snapshots/<snapshot-id>/`, verifies it,
-   applies SELinux labels, checks Apache configuration, and starts the server.
+1. Enter the address clients can reach, such as `http://mirror.example.org`,
+   when the overview asks for it, or under **Settings → Client-facing address**.
+2. After an import, the overview offers **Publish ‹date› snapshot** for the
+   latest import. This creates a separate copy of indexed repository metadata and
+   RPMs under `/var/www/disconnected-content/public/snapshots/<snapshot-id>/`,
+   verifies it, applies SELinux labels, checks Apache configuration, and starts
+   the server. To publish an older snapshot, use **Content → Snapshots → Publish**.
 3. Permit inbound TCP port 80 from approved client networks through your firewall
    policy. Publication does not modify firewall rules or network isolation.
-4. Download the displayed `.repo` file and install it on compatible client hosts
-   as `/etc/yum.repos.d/disconnected-content.repo`. Review the displayed setup
-   commands to refresh metadata, inspect security advisories, and preview updates.
+4. Open **Clients** and choose the Ansible kit or the manual commands.
 
 The GUI shows the current publication and timestamp, complete configuration, and
 client commands. Package GPG checks stay enabled, with keys provisioned and
@@ -228,8 +259,8 @@ It requires additional storage for the public copy; the reserve is checked on
 the publication filesystem. Logs, jobs, inbox archives, snapshot state files, and
 unindexed files are excluded. Private staging is outside the Apache alias.
 
-The **Client setup** tab provides repository configuration, two downloadable playbooks,
-an example inventory, and run instructions. Configure a canary client's pinned
+**Clients → Ansible → Download Ansible kit (.zip)** provides two playbooks, an
+example inventory, and run instructions in one archive. Configure a canary client's pinned
 repositories, preview security updates with `--check --diff`, then apply during
 a maintenance window. The update playbook requires the exact paired repository
 file and advisory metadata, selects only its publication's repository IDs, runs
@@ -246,16 +277,18 @@ for prerequisites, commands, and the later AAP integration direction.
 | --- | --- |
 | Connected tabs on an import host | Check the root-owned configuration's `role`; installing the publisher does not change it |
 | Unsigned prototype imports disabled | Review the prototype manifest policy and the explicit administrator opt-in in the installation guide; RPM signatures remain required |
-| Transfer archive missing | Mount the media, choose the correct folder, save it, and scan again; only the selected folder is scanned |
+| Sync reports unsigned packages | The repository includes unsigned RPMs; choose a repository whose packages are all signed |
+| Export folder unavailable | Mount the drive at the saved path or choose another folder in Settings |
+| Transfer archive missing | Mount the media and choose the correct folder in Settings; only the selected folder is scanned |
 | Checksum sidecar missing or mismatched | Transfer the matching `.tar.sha256` with the archive; replace a changed/corrupt transfer from a verified export |
 | No keys included in an old bundle | Rebuild the connected export or supply an approved public key separately |
-| Missing RPM signing key | Review the bundled key, verify its full fingerprint independently, approve it, and retry import |
+| Missing RPM signing key | Choose Review & import again and approve the key, or add it under Settings → Add a key manually |
 | Invalid RPM signature or package checksum | Replace the affected content from a verified source; no signature bypass is available |
 | Publication unavailable | Check the optional publisher package, Apache state, public-file checks, client-facing URL, and firewall policy |
 | Security-update playbook stops for missing advisories | Mirror `updateinfo` for every selected repository; repository configuration can still be used without a security-only update transaction |
 | Client playbook reports a missing or changed key/configuration | Download the matching pair from the intended publication and run its configuration playbook before previewing updates |
 
-Use **Activity & evidence** to inspect the affected job's timestamps, stage, and
+Use **Activity** to inspect the affected job's timestamps, stage, and
 retained diagnostic output. A successful download does not establish that clients
 were configured or patched. Identical reimports can match an existing snapshot
 without repeating full RPM validation; use a fresh, unimported bundle for an

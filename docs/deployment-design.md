@@ -33,7 +33,7 @@ Add a small setup command around standard DNF installation and root-owned
 configuration. A proposed interface is:
 
 ```text
-# Proposed interface only; these commands do not exist in version 0.10.0.
+# Proposed interface only; these commands do not exist in version 0.11.0.
 disconnected-content-setup --role connected --state-dir /srv/disconnected-content
 disconnected-content-setup --role disconnected --with-publisher --state-dir /srv/disconnected-content
 ```

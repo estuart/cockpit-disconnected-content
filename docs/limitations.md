@@ -19,7 +19,11 @@
   entitlement configuration. Cross-major mirroring, EUS selection, architectures,
   and release-policy management are not implemented.
 - A complete repository is mirrored; package filtering and newest-only sync are
-  deliberately excluded to avoid inconsistent original metadata.
+  deliberately excluded to avoid inconsistent original metadata. Host
+  `includepkgs`/`excludepkgs` settings are ignored for mirroring. Repositories with
+  any unsigned packages cannot be mirrored.
+- The connected GUI can set the export folder and size limit. Certificate
+  verification cannot be disabled; private CAs belong in the system trust store.
 - Each cycle is a new full snapshot. Resume, deduplication, deltas, scheduled jobs,
   automatic cleanup, and retention policies are future work.
 - Storage preflight is an estimate, not a hard quota. Runtime reserve monitoring

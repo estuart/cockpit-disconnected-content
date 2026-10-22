@@ -11,7 +11,7 @@ spec.loader.exec_module(engine)
 states = {}
 cases = ['source', 'waiting', 'incoming', 'policy', 'checksum', 'publisher', 'url', 'publish', 'clients',
          'pending', 'older', 'server-down', 'public-missing', 'url-changed', 'failed-import', 'failed-publish',
-         'running-import', 'running-publish', 'known']
+         'running-import', 'running-publish', 'known', 'new-over-publish', 'leftover']
 for case in cases:
     with tempfile.TemporaryDirectory() as temporary:
         app = engine.Engine({'role': 'disconnected', 'state_dir': temporary, 'allow_unsigned_imports': case != 'policy'})
@@ -22,7 +22,7 @@ for case in cases:
                     'os': {'major': '10', 'arch': 'x86_64'}, 'package_bytes': 90000000,
                     'source_archive_sha256': 'c' * 64, 'repositories': repositories}
         snapshots = [] if case in {'source', 'waiting', 'incoming', 'policy', 'checksum'} else [snapshot]
-        if case in {'incoming', 'policy', 'checksum', 'pending', 'known'}:
+        if case in {'incoming', 'policy', 'checksum', 'pending', 'known', 'new-over-publish', 'leftover'}:
             path = app.root / 'incoming/transfer.tar'
             path.write_bytes(b'Generic archive fixture')
             checksum = engine.digest(path)
@@ -33,7 +33,7 @@ for case in cases:
                        'base_url': '' if case == 'url' else 'http://mirror.example.org', 'current': None,
                        'availability': {'state': 'not_published', 'reason': 'No publication'}}
         if case in {'clients', 'pending', 'older', 'server-down', 'public-missing', 'url-changed',
-                    'failed-import', 'failed-publish', 'running-import', 'running-publish', 'known'}:
+                    'failed-import', 'failed-publish', 'running-import', 'running-publish', 'known', 'new-over-publish', 'leftover'}:
             record = {'snapshot_id': sid, 'published_at': '2026-01-01T11:00:00+00:00',
                       'verified_at': '2026-01-01T10:59:00+00:00', 'base_url': 'http://mirror.example.org',
                       'config_url': 'http://mirror.example.org/disconnected-content/client.repo',
@@ -44,12 +44,16 @@ for case in cases:
                 publication['availability'] = {'state': 'unavailable', 'reason': 'Public repository index missing'}
             if case == 'url-changed':
                 publication['base_url'] = 'https://new.example.org'
-            if case == 'older':
+            if case in {'older', 'new-over-publish'}:
                 snapshots = [{**snapshot, 'id': 'd' * 32, 'created': '2026-01-02T10:00:00+00:00'}, snapshot]
         source, incoming = app.scan_incoming()
         if case == 'source':
             source.update(available=False, error='Mount transfer media or select an existing folder')
         jobs = []
+        if case == 'leftover':
+            # An earlier failed attempt, older than the current publication, leaves the file needing another check.
+            jobs = [{'id': 'f' * 32, 'operation': 'import', 'status': 'failed', 'bundle_name': 'transfer.tar', 'incoming_dir': source['path'],
+                     'created': '2025-12-31T09:00:00+00:00', 'finished': '2025-12-31T09:01:00+00:00', 'stage': 'Archive member checksum mismatch'}]
         if case.startswith(('failed-', 'running-')):
             operation = 'publish' if case.endswith('publish') else 'import'
             jobs = [{'id': 'e' * 32, 'operation': operation, 'status': 'running' if case.startswith('running') else 'failed',

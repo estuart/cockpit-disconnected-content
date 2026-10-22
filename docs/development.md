@@ -39,6 +39,10 @@ node scripts/signing-key-smoke.mjs
 python3 scripts/check-playbooks.py
 ```
 
+The dashboard smoke test renders every backend fixture state, checks the next
+action and its helper call, and checks narrow layouts. The signing-key smoke
+test drives inline key approval during import, including cancel without trust.
+
 The playbook checker requires Ansible Core on the development host. CI uses
 Ansible Core 2.19; generated playbooks have also been exercised with Core 2.16
 on RHEL. Browser scripts use Chrome locally and Playwright Chromium in CI. On a development
@@ -53,7 +57,7 @@ npm run build
 node scripts/capture-doc-screenshots.mjs
 ```
 
-This captures six views of the real frontend with generic backend-derived test
+This captures eight views of the real frontend with generic backend-derived test
 fixtures, UTC timestamps, and a fixed demo clock. It writes `docs/screenshots/`.
 It does not log into hosts, contact repository servers, or capture live inventories.
 Review the images before committing. The example fingerprint is a placeholder,

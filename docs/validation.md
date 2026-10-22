@@ -367,3 +367,47 @@ rebuild to include keys. The bundle manifest remains unsigned; public-key delive
 is separate from the operator's independent fingerprint verification and approval.
 The live Cockpit browser URL remained unavailable to the browser tool; GUI checks
 used local browser fixtures, while deployment checks used SSH.
+
+## Streamlined workflows
+
+Version 0.11.0 replaces the multi-tab workflows with one guided path per role: a
+combined sync-and-bundle job, inline key approval during import, guided
+publication, and a one-file Ansible kit. It was validated in a live authenticated
+Cockpit session on both lab hosts (RHEL 10.2, SELinux enforcing, disconnected host
+without default routes) using `scripts/browser-smoke.mjs`.
+
+- Passed 150 backend tests, TypeScript checks, production builds, 31 fixture-driven
+  workflow states, inline key approval, cancel-without-trust, manual approval, exact
+  downloads, ZIP contents, and narrow-layout checks on the development system. RPMs
+  built on RHEL; installed helper and frontend hashes matched the source build.
+- Connected host: **Sync & build bundle** ran one service-backed job through space
+  check, download, bundle, and verification; the overview then showed both transfer
+  file paths. The previous 0.10.0 bundle remained shown as ready before the run.
+- Transferred the bundle and sidecar with byte counts and SHA-256 compared at each
+  hop. Imports and publication were unchanged by the transfer.
+- Disconnected host: with the repository's approval temporarily removed (backed up),
+  **Review & import** verified the archive and showed only that repository's key with
+  its full fingerprint; approval was disabled until the confirmation was checked.
+  After approval the import validated RPM signatures with the pinned key. The host
+  keyring check found both parseable Red Hat keys; a version 6 key that GnuPG 2.4
+  cannot read is skipped, so such a key would be prompted for rather than assumed.
+- Publishing an older snapshot from **Content** and then the latest from the overview
+  both succeeded through copy, verification, and web-server steps. The published key
+  passed SHA-256 and full-fingerprint checks over HTTP, the `.repo` file was pinned to
+  the snapshot, and DNF read its metadata from a temporary repository directory.
+- Lab state found two UI issues that were fixed before this record: an unpublished
+  older import no longer hides a newer bundle, and a file whose last import failed
+  no longer takes over the overview while current content is served.
+
+Later in the same cycle, operator testing surfaced three connected-side issues.
+Host `includepkgs` filters made DNF see only part of a repository, so the download
+disagreed with its metadata; mirroring now uses `--disableexcludes=all`, and a
+complete 107-package third-party repository synced, bundled, and verified in about
+20 seconds. A repository with legacy unsigned packages now fails with a message
+naming one, and empty or oversized selections name the repository or sizes. A
+connected **Settings** tab adds an export folder and the size limit; exports to a
+saved folder record their path, and verification follows it.
+
+Generated playbooks are unchanged from 0.10.0 and were not rerun against a client
+in this cycle; CI checks their syntax. The live test removed and restored one
+scoped repository approval; host RPM trust was not changed.

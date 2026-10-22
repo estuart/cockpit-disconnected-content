@@ -14,7 +14,7 @@ returns at most 500 immediate real subdirectories, a parent path, and shortcuts
 from the current Linux mount table and existing common transfer directories.
 Mount-table path escapes are decoded; absent locations and symlinks are omitted.
 It returns folder names and paths, without reading file contents or modifying
-source settings. The GUI applies a chosen folder only after Save & scan.
+source settings. Choosing a folder in the picker then calls the separate save command.
 
 Starting a job writes a durable JSON record under an exclusive lock and starts a
 systemd template service. The service owns the process tree. State is replaced
@@ -22,13 +22,23 @@ atomically; command output is stored locally. Jobs survive browser disconnects.
 After a machine restart, a stale active record is reconciled with systemd and
 shown as interrupted. Interrupted content is never listed as a validated snapshot.
 
-The connected pipeline is:
+The connected pipeline is below. The `sync-export` job runs sync then export in one
+systemd job; a retry after a failed bundle step rebuilds only the bundle.
+Jobs record a coarse `step` so the UI shows progress without parsing stage text.
 
 ```
 saved repository IDs -> declared-size preflight -> reposync with metadata
 -> validate indexed metadata -> validate referenced RPMs and signatures
 -> validated snapshot -> hash manifest -> tar -> read-back verification -> export
 ```
+
+Size checks and reposync run with `--disableexcludes=all` so host include/exclude
+filters cannot produce a partial mirror that disagrees with the original metadata.
+Exports are written to the root-owned `export_dir` setting when set (saved through
+`save-export-settings`, connected role only, validated as a real writable directory
+outside private state), otherwise to private state. Each export record stores the
+archive path it was written to; availability checks and verification use that
+recorded path, and records without one resolve to the private-state location.
 
 Each sync creates a new directory. No mutation, pruning, or deletion of an older
 validated snapshot is performed. Partial content is retained for diagnosis but is
@@ -164,6 +174,8 @@ stopped service, a different latest import, or a changed saved server URL direct
 operators to review publication. Publication remains an explicit action.
 
 Client setup is a dedicated tab; downloads are pinned to the recorded publication.
+The Ansible kit is a stored (uncompressed) ZIP assembled in the browser from the
+helper's generated files; the helper still produces every file.
 No client is marked configured or updated from a download, and the workflow's
 last step remains unconfirmed. The application does not execute remote Ansible,
 store client credentials, or add AAP integration.
@@ -196,3 +208,12 @@ and sidecar before staging candidate bytes in private state. Candidate review bi
 to those bytes, repository ID, and archive digest. The existing expiring review and
 explicit confirmation remain the only route to approval. Public-key candidates
 never enter import validation, publication, or client trust automatically.
+
+`scan-bundle-keys` also reports, for each candidate, whether the repository
+already has that key approved and whether its full primary fingerprint is in the
+host RPM keyring (read with `rpm -q gpg-pubkey` and an isolated GnuPG listing).
+The GUI uses these flags only to decide which keys to ask about; validation
+still uses approved keys or the host keyring exactly as before. A separate
+read-only `bundle-info` command returns the first archive member's manifest
+summary (repositories, build time, key counts, platform match) for display. It
+does not verify the archive and is never used as evidence.
