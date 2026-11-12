@@ -7,10 +7,16 @@ URL: https://github.com/estuart/cockpit-disconnected-content
 Source0: %{name}-%{version}.tar.gz
 BuildArch: noarch
 BuildRequires: make
-BuildRequires: systemd-rpm-macros
 Requires: cockpit-system >= 300
 Requires: cockpit-bridge >= 300
+%if 0%{?rhel} == 8
+# RHEL 8's python3 is 3.6; the helper needs 3.9 or later, so it runs on python3.12 (RHEL 8.10 AppStream).
+BuildRequires: systemd
+Requires: python3.12
+%else
+BuildRequires: systemd-rpm-macros
 Requires: python3 >= 3.9
+%endif
 Requires: dnf-plugins-core
 Requires: rpm
 Requires: gnupg2
@@ -40,6 +46,9 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 
 %install
 %make_install
+%if 0%{?rhel} == 8
+sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/python3.12|' %{buildroot}%{_libexecdir}/disconnected-content
+%endif
 
 %post
 %systemd_post disconnected-content-job@.service

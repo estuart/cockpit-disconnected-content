@@ -5,7 +5,7 @@ the air gap, and import and publish that content through the RHEL web console.
 The disconnected host also generates client repository configuration and Ansible
 playbooks for configuring repositories and applying security updates.
 
-**Prototype 0.11.0.** Tested on RHEL 10.2 x86_64. Transfer manifests are currently
+**Prototype 0.11.0.** Built for RHEL 8.10, 9, and 10; validated end to end on RHEL 10.2 x86_64. Transfer manifests are currently
 unsigned and imports require explicit administrator opt-in. RPM signature checks
 remain mandatory. This is an independently maintained prototype; running inside
 Cockpit does not create a Red Hat product support commitment. Operators remain
@@ -60,7 +60,7 @@ whether the host is connected or disconnected. See
    [latest release](https://github.com/estuart/cockpit-disconnected-content/releases/latest),
    or build them with the [development guide](docs/development.md). A connected
    host can install directly with
-   `sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.noarch.rpm`.
+   `sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.el$(rpm -E %rhel).noarch.rpm`.
 2. **Install the main RPM on both hosts**, and the optional publisher only where
    repositories will be served. Provision all runtime dependencies before
    isolating the disconnected host, or use an approved offline bootstrap repository.

@@ -16,14 +16,23 @@ reviewed = deepcopy(native)
 reviewed['repositories'] = {'vendor-example': {'metadata_types': ['primary'], 'signing_keys': [key()]}}
 reviewed['client_config'] = engine.client_repo_config(reviewed['base_url'],
     {'id': reviewed['snapshot_id'], 'repositories': reviewed['repositories']})
-for record in [native, reviewed]:
+rhel8 = deepcopy(native)
+rhel8['os'] = {**rhel8['os'], 'major': '8'}
+for record in [native, reviewed, rhel8]:
     result = engine.client_automation(record)
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         for name, content in result['files'].items():
             (root / name).write_text(content)
         for name in ['configure-repos.yml', 'security-updates.yml']:
-            play = DataLoader().load(result['files'][name])[0]
+            plays = DataLoader().load(result['files'][name])
+            if record is rhel8:
+                # Python 3.6 clients need Ansible Core 2.16; that's checked before facts are gathered.
+                assert len(plays) == 2 and plays[0]['gather_facts'] is False
+                assert "version('2.17', '<')" in plays[0]['tasks'][0]['ansible.builtin.assert']['that'][1]
+            else:
+                assert len(plays) == 1
+            play = plays[-1]
             assert play['serial'] == 1 and play['any_errors_fatal'] is True
             assert play['hosts'] == 'disconnected_clients' and play['become'] is True
             if name == 'configure-repos.yml':
@@ -41,4 +50,4 @@ for record in [native, reviewed]:
                 if record is reviewed:
                     assert key()['sha256'] in result['files'][name]
             subprocess.run(['ansible-playbook', '-i', str(root / 'inventory.ini'), '--syntax-check', str(root / name)], check=True)
-print('Native and reviewed-key playbooks: parsing, transaction scope, fingerprints, and Ansible syntax checks passed')
+print('Native, reviewed-key, and RHEL 8 playbooks: parsing, transaction scope, fingerprints, control-node checks, and Ansible syntax checks passed')

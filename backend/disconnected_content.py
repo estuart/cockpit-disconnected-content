@@ -107,11 +107,26 @@ def public_key_blocks(text):
 
 
 def configured_signing_key_sources(repo_ids):
-    """Use DNF's expanded configuration, without exporting URLs or credentials."""
-    import dnf
-    with dnf.Base() as base:
-        base.read_all_repos()
-        return {rid: list(base.repos[rid].gpgkey) for rid in repo_ids if rid in base.repos}
+    """Use DNF's expanded configuration, without exporting URLs or credentials.
+
+    Reads `dnf config-manager --dump` rather than importing DNF's Python bindings: those exist
+    only for the platform Python, which on RHEL 8 is older than this helper supports."""
+    result = {}
+    for rid in repo_ids:
+        dumped = subprocess.run(["/usr/bin/dnf", "-q", "config-manager", "--dump", rid], check=False,
+                                capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"})
+        if dumped.returncode == 0:
+            result[rid] = dumped_gpgkeys(dumped.stdout)
+    return result
+
+
+def dumped_gpgkeys(text):
+    """The gpgkey list from one repository's `dnf config-manager --dump`, variables already expanded."""
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == "gpgkey":
+            return [key.strip() for key in value.split(",") if key.strip()]
+    return []
 
 
 def read_public_key_source(value):
@@ -680,9 +695,17 @@ remote execution from Cockpit, credential storage, or AAP integration is include
 """
     instructions += "\nReviewed public signing keys:\n" + "".join(
         key["fingerprint"] + "  SHA256 " + key["sha256"] + "\n" for key in keys)
+    # RHEL 8 clients run Python 3.6. Ansible Core 2.17 and later can't manage it and fail while
+    # gathering facts, before any task in the main play runs, so check the control node first.
+    preflight = [{"name": "Check the control node for RHEL 8 clients", "hosts": "disconnected_clients", "gather_facts": False,
+                  "tasks": [{"name": "Require Ansible Core 2.16 for RHEL 8 clients", "run_once": True,
+                             "ansible.builtin.assert": {"that": ["ansible_version.full is version('2.16', '>=')",
+                                                                 "ansible_version.full is version('2.17', '<')"],
+                                 "fail_msg": "RHEL 8 clients run Python 3.6, which Ansible Core 2.17 and later can't manage. "
+                                             "Run these playbooks with Ansible Core 2.16."}}]}] if platform["major"] == "8" else []
     return {"snapshot_id": sid, "has_updateinfo": advisory, "files": {
-        "configure-repos.yml": header + yaml_document([configure]),
-        "security-updates.yml": header + yaml_document([security]),
+        "configure-repos.yml": header + yaml_document(preflight + [configure]),
+        "security-updates.yml": header + yaml_document(preflight + [security]),
         "inventory.ini": inventory, "README-client-automation.txt": instructions}}
 
 

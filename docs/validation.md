@@ -440,3 +440,32 @@ configuration.
     allowed through `setup` on stdin;
   - stayed `root:root 0644`, wrote one `config.json.bak-*`, refused
     `setup connected`, and showed the disconnected overview.
+
+## RHEL 8, 9, and 10 packages
+
+Releases now include RPMs for RHEL 8, 9, and 10, built from one source archive. The
+helper no longer imports DNF's Python bindings. Those exist only for the platform
+Python, which on RHEL 8 is 3.6. The helper reads each repository's key sources from
+`dnf config-manager --dump` instead. On RHEL 8 the package runs the helper on
+`python3.12`.
+
+- **dnf output.** `dnf config-manager --dump` printed the same `gpgkey = a, b` line,
+  with variables expanded, on dnf 4.7 (EL 8), 4.14 (EL 9), and 4.20 (EL 10). The
+  parser is tested against that output, and a test fails if the helper imports
+  `dnf`, `rpm`, `libdnf`, `gpg`, or `selinux`.
+- **Unit tests.** 181 backend tests passed on Python 3.9 and 3.12. CI now runs both.
+- **Packages.** RPMs were built from one source archive on AlmaLinux 8.10, AlmaLinux 9.8,
+  and CentOS Stream 10. On each, in a clean container:
+  - the main package installed without Apache, then the publisher installed;
+  - the helper used `/usr/bin/python3.12` (3.12.15) on EL 8, and `/usr/bin/python3`
+    on EL 9 (3.9.25) and EL 10 (3.12.15);
+  - `status` reported no role, and `setup connected` worked.
+- **Key sources.** On each release, `configured_signing_key_sources` found the
+  distribution's own BaseOS key file, skipped an unknown repository, and the keys
+  parsed as public certificates.
+- **Playbooks.** Playbooks for a RHEL 8 publication start with a control-node check,
+  which skips fact gathering and requires Ansible Core 2.16. They passed Ansible Core
+  2.19 syntax checks along with the RHEL 10 and reviewed-key variants.
+- **Not tested here.** Containers don't run systemd, SELinux, or Cockpit, so the job
+  service, the web console, and a full sync, import, and publish on RHEL 8 and 9 are
+  left for lab validation.
