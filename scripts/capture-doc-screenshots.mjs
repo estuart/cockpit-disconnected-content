@@ -4,7 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { readFile, mkdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 
-const connected = JSON.parse(execFileSync('python3', ['scripts/dashboard-fixtures.py'], { encoding: 'utf8' })).ready;
+const dashboards = JSON.parse(execFileSync('python3', ['scripts/dashboard-fixtures.py'], { encoding: 'utf8' }));
+const connected = dashboards.ready;
+const firstRun = dashboards.setup;
 const disconnected = JSON.parse(execFileSync('python3', ['scripts/disconnected-fixtures.py'], { encoding: 'utf8' }))['disconnected-clients'];
 const signing = JSON.parse(execFileSync('python3', ['scripts/signing-key-fixtures.py'], { encoding: 'utf8' }));
 // Fixed demo time avoids screenshots that grow stale every day.
@@ -48,6 +50,13 @@ async function pageFor(state) {
   return { page, errors };
 }
 try {
+  const setupPage = await pageFor(firstRun);
+  await setupPage.page.getByRole('radio', { name: /^Disconnected host/ }).check();
+  await expect(setupPage.page.getByRole('button', { name: 'Set up as a disconnected host', exact: true })).toBeEnabled();
+  await setupPage.page.screenshot({ path: `${output}/first-run-setup.png`, fullPage: true });
+  expect(setupPage.errors).toEqual([]);
+  await setupPage.page.close();
+
   const connectedPage = await pageFor(connected);
   await expect(connectedPage.page.getByText('✓ Bundle ready to transfer', { exact: true })).toBeVisible();
   await connectedPage.page.screenshot({ path: `${output}/connected-dashboard.png`, fullPage: true });
@@ -81,7 +90,7 @@ try {
   await keysPage.page.screenshot({ path: `${output}/client-automation.png`, fullPage: true });
   expect(keysPage.errors).toEqual([]);
   await keysPage.page.close();
-  console.log('Eight documentation screenshots captured from generic frontend fixtures');
+  console.log('Nine documentation screenshots captured from generic frontend fixtures');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

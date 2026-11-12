@@ -11,15 +11,41 @@ One repository builds one source archive and two binary RPMs:
   version/release of the main package.
 
 The root-owned JSON configuration selects `connected` or `disconnected` at
-runtime. Backend operations check the role. A fresh installation defaults to
-connected mode. The publisher does not change the role or start serving content
-until an administrator publishes a snapshot. Both modes and the publisher spec
-are tracked together in this repository.
+runtime. Backend operations check the role. A fresh installation has no role. The
+publisher does not change the role or start serving content until an
+administrator publishes a snapshot. Both modes and the publisher spec are tracked
+together in this repository.
 
-There is no `install.sh --role ...` or setup CLI today. Follow the
-[installation guide](installation.md) for the implemented package/configuration
-steps. `make install` is the build system's installation target; it is also used
-when assembling RPMs and is not a customer role-selection wizard.
+## Setup
+
+The role is chosen with the helper's `setup` command. The web console calls it
+from the first-run screen, and administrators can run it from a shell:
+
+```text
+/usr/libexec/disconnected-content setup connected
+/usr/libexec/disconnected-content setup disconnected
+```
+
+The web console also uses `setup` to turn the disconnected prototype import
+policy (`allow_unsigned_imports`) on or off for a host that already has the
+disconnected role. Setup:
+
+- Requires an explicit role. It never guesses, though status reports a
+  `setup_hint` when a host without a role already holds content, so the first-run
+  screen can pre-select it.
+- Refuses to switch an already configured host to the other role. Changing roles
+  with existing content needs a deliberate migration path.
+- Refuses to run during active work, after clearing jobs a crash left behind.
+- Re-reads the configuration under the engine lock, preserves every other key,
+  saves a timestamped `config.json.bak-*` copy, writes atomically, and keeps the
+  file root-owned with mode `0644`.
+- Never turns on unsigned manifests unless asked to, approves signing keys,
+  changes firewall policy, weakens network isolation, or moves state. Role
+  selection is not a replacement for the network's air-gap controls.
+
+Setup doesn't change `state_dir`. Choose storage in the configuration file before
+setting up a host. `make install` is the build system's installation target; it is
+also used when assembling RPMs and is not part of setup.
 
 ## Recommended direction
 
@@ -29,27 +55,11 @@ job evidence, key review, and client configuration. It avoids conflicting files
 or duplicate builds when connected and disconnected behavior share most code.
 Apache remains optional for hosts that only mirror or import content.
 
-Add a small setup command around standard DNF installation and root-owned
-configuration. A proposed interface is:
-
-```text
-# Proposed interface only; these commands do not exist in version 0.11.0.
-disconnected-content-setup --role connected --state-dir /srv/disconnected-content
-disconnected-content-setup --role disconnected --with-publisher --state-dir /srv/disconnected-content
-```
-
-The role should be an explicit required choice. The publisher option should check
-that the matching package is present, or clearly present the DNF transaction it
-would require. It must support local/offline repositories and must not assume
-that an importer can reach the internet. The source-of-truth role remains the
-root-owned configuration so Cockpit, CLI operations, and systemd workers agree.
-
-Setup should show a reviewable plan, preserve existing settings, write atomically,
-back up the configuration, and refuse a role change during active work. Changing
-roles with existing content needs a deliberate migration path. It should not
-silently opt into unsigned manifests, approve signing keys, change firewall
-policy, weaken network isolation, or overwrite state. Role selection is not a
-replacement for the network's air-gap controls.
+The source-of-truth role remains the root-owned configuration, so Cockpit, CLI
+operations, and systemd workers agree. Setup does not install packages: the
+publisher is installed with DNF, and the first-run screen only reports whether it
+is present. Installing it must keep working from local or offline repositories
+without assuming the importer can reach the internet.
 
 If dependency size later becomes material, split connected download tooling from
 the shared engine into an optional subpackage while keeping a single codebase.
@@ -57,5 +67,5 @@ The current main package includes DNF tooling on both sides; no dependency split
 is being claimed here. Small role metapackages could eventually simplify fleet
 installation, but separate application builds are not needed for this prototype.
 
-The setup command, metapackages, bootstrap-media builder, and role migration are
-proposals. This documentation does not introduce them or alter installed host roles.
+Metapackages, a bootstrap-media builder, a `state_dir` migration, and role
+migration are proposals. This documentation does not introduce them.

@@ -44,6 +44,7 @@ NS_REPO = "{http://linux.duke.edu/metadata/repo}"
 NS_COMMON = "{http://linux.duke.edu/metadata/common}"
 FINGERPRINT = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
 KEY_LIMIT = 65536
+ROLES = ("connected", "disconnected")
 
 
 def public_key_blocks(text):
@@ -804,7 +805,7 @@ class Engine:
         if not isinstance(data, dict) or set(data) != {"bundle_name"}:
             raise ValueError("Select one incoming bundle to inspect")
         with self.lock():
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Wait for the active job before inspecting bundle keys")
             path = self.bundle_path(data["bundle_name"])
             fingerprint = self.fingerprint(path)
@@ -923,7 +924,7 @@ class Engine:
                 or data["confirmed"] is not True):
             raise ValueError("Review the public key and explicitly confirm its full fingerprint")
         with self.lock():
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Wait for the active job before approving signing keys")
             path = safe_path(self.root / "key-reviews", data["review_id"] + ".json")
             review = read_json(path)
@@ -960,6 +961,10 @@ class Engine:
         with (self.root / ".lock").open("a") as stream:
             fcntl.flock(stream, fcntl.LOCK_EX)
             yield
+
+    def active_job(self):
+        """True when a job is queued or running. Call while holding lock()."""
+        return any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json"))
 
     def job_path(self, jid):
         if not ID.fullmatch(jid):
@@ -1027,7 +1032,7 @@ class Engine:
             raise ValueError("Specify only the public server URL")
         origin = public_origin(data["base_url"])
         with self.lock():
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Wait for the active job before changing publication settings")
             config = read_json(CONFIG)
             config["public_base_url"] = origin
@@ -1156,7 +1161,7 @@ class Engine:
         with os.scandir(path) as entries:
             next(entries, None)
         with self.lock():
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Wait for the active job to finish before changing the source directory")
             config = read_json(CONFIG)
             config.update(incoming_dir=str(path), incoming_updated_at=now())
@@ -1177,6 +1182,58 @@ class Engine:
             return Path(value)
         return self.root / "exports" / f"{sid}.tar"
 
+    def setup(self, data):
+        """Choose this host's role on first use, or change the disconnected prototype import policy.
+
+        The role is chosen once. Changing it later stays a manual, planned operation because
+        snapshots, approvals, and publications from the old role remain in the state directory."""
+        if not isinstance(data, dict) or "role" not in data or not set(data) <= {"role", "allow_unsigned_imports"}:
+            raise ValueError("Specify the role, and optionally the unsigned-import policy")
+        role, unsigned = data["role"], data.get("allow_unsigned_imports")
+        if role not in ROLES:
+            raise ValueError("Role must be connected or disconnected")
+        if unsigned is not None and (role != "disconnected" or not isinstance(unsigned, bool)):
+            raise ValueError("The unsigned-import policy applies only to disconnected hosts and must be true or false")
+        self.jobs()  # Clear jobs a crash left behind so they can't block setup forever.
+        with self.lock():
+            if self.active_job():
+                raise ValueError("Wait for the active job to finish before changing setup")
+            config = read_json(CONFIG)
+            current = config.get("role")
+            if current in ROLES and current != role:
+                raise ValueError(f"This host is already set up as {current}. Changing roles is a manual step; "
+                                 "see docs/installation.md")
+            if current == role and (unsigned is None or config.get("allow_unsigned_imports") is unsigned):
+                self.config = config
+                return {"role": role, "allow_unsigned_imports": config.get("allow_unsigned_imports") is True,
+                        "changed": False}
+            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            backup = CONFIG.with_name(f"{CONFIG.name}.bak-{stamp}")
+            shutil.copy2(CONFIG, backup)
+            config["role"] = role
+            if unsigned is not None:
+                config["allow_unsigned_imports"] = unsigned
+            elif role == "disconnected":
+                config.setdefault("allow_unsigned_imports", False)
+            config["configured_at"] = now()
+            write_json(CONFIG, config)
+            os.chmod(CONFIG, 0o644)  # Keep the packaged mode; the file holds no secrets.
+            self.config = config
+        return {"role": role, "allow_unsigned_imports": config.get("allow_unsigned_imports") is True,
+                "changed": True, "backup": str(backup), "configured_at": config["configured_at"]}
+
+    def setup_hint(self, snapshots, jobs):
+        """Suggest a role when a host without one already holds content, such as after an upgrade
+        replaced an unmodified packaged config that used to default to connected."""
+        if self.config.get("role") in ROLES:
+            return None
+        if ((self.root / "publication.json").exists() or any((self.root / "import-records").iterdir())
+                or any(s.get("imported") for s in snapshots) or any(j.get("operation") in {"import", "publish"} for j in jobs)):
+            return "disconnected"
+        if snapshots or jobs or any((self.root / "export-records").iterdir()):
+            return "connected"
+        return None
+
     def save_export_settings(self, data):
         if self.config.get("role") != "connected":
             raise ValueError("Export settings require the connected installation role")
@@ -1192,7 +1249,7 @@ class Engine:
             os.close(fd)
             os.unlink(name)
         with self.lock():
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Wait for the active job to finish before changing the export folder")
             config = read_json(CONFIG)
             if default:
@@ -1483,7 +1540,7 @@ class Engine:
         elif not latest and not serving or pending:
             if not source["available"]:
                 phase, reason = "source", "The saved transfer folder is unavailable. Mount the media or choose an existing directory."
-            elif not self.config.get("allow_unsigned_imports"):
+            elif self.config.get("allow_unsigned_imports") is not True:
                 phase, reason = "import_policy", "Prototype imports are disabled by administrator policy. Review the import requirements."
             elif incoming:
                 phase, reason = "import", "Review transferred bundles and validate the content you want to import."
@@ -1523,6 +1580,7 @@ class Engine:
         publication = self.publication_status() if self.config.get("role") == "disconnected" else None
         disconnected = self.disconnected_status(snapshots, jobs, source, incoming, publication) if publication else None
         return {"version": VERSION, "role": self.config.get("role"), "os": host_os(),
+                "setup_hint": self.setup_hint(snapshots, jobs),
                 "storage": {"path": str(self.root), "free": usage.free, "total": usage.total,
                             "reserve": self.floor}, "profile": self.profile(), "repositories": repositories(),
                 "jobs": jobs[:50], "snapshots": sorted(snapshots, key=lambda s: s["created"], reverse=True),
@@ -1536,7 +1594,8 @@ class Engine:
                 "connected": connected,
                 "export_settings": self.export_settings() if self.config.get("role") == "connected" else None,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
-                                 "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True}}
+                                 "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True,
+                                 "publisher_installed": PUBLISH_CONF.is_file() and not PUBLISH_CONF.is_symlink()}}
 
     def scan_incoming(self):
         source = {"path": self.config.get("incoming_dir", str(self.root / "incoming")),
@@ -1606,7 +1665,7 @@ class Engine:
             if source is not None:
                 self.bundle_path(snapshot_id, str(source))
             # Read files directly: reconciliation in jobs() acquires the same lock.
-            if any(read_json(p)["status"] in {"queued", "running"} for p in (self.root / "jobs").glob("*.json")):
+            if self.active_job():
                 raise ValueError("Another job is active; wait for it to finish or stop it")
             profile = self.profile()
             if operation in {"preflight", "sync", "sync-export"}:
@@ -1962,7 +2021,7 @@ class Engine:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["status", "client-automation", "scan-bundle-keys", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "save-export-settings", "browse-directories", "bundle-info", "start", "run-job", "logs", "cancel"])
+    parser.add_argument("command", choices=["status", "client-automation", "scan-bundle-keys", "review-signing-key", "trust-signing-key", "save-profile", "save-import-settings", "save-publication-settings", "save-export-settings", "browse-directories", "bundle-info", "setup", "start", "run-job", "logs", "cancel"])
     parser.add_argument("argument", nargs="?")
     parser.add_argument("snapshot", nargs="?")
     args = parser.parse_args()
@@ -1974,6 +2033,16 @@ def main():
     engine = Engine()
     if args.command == "status":
         result = engine.status()
+    elif args.command == "setup":
+        # `setup connected` from a shell; the web console sends JSON on stdin.
+        if args.argument:
+            data = {"role": args.argument}
+        else:
+            raw = sys.stdin.read(16385)
+            if len(raw) > 16384:
+                raise ValueError("Request is too large")
+            data = json.loads(raw)
+        result = engine.setup(data)
     elif args.command == "client-automation":
         result = engine.client_automation(args.argument)
     elif args.command in {"save-profile", "save-import-settings", "save-publication-settings", "save-export-settings", "browse-directories", "bundle-info", "scan-bundle-keys", "review-signing-key", "trust-signing-key"}:

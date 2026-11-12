@@ -5,6 +5,7 @@ import { BundleInfo, IncomingBundle, KeyCandidate, KeyReview, KeyScan, bytes, ca
   groupFingerprint, plural, shortDate, snapshotLabel } from './api';
 import { Ctx } from './connected';
 import { DirectoryPicker } from './picker';
+import { UnsignedImportsDialog } from './setup';
 import { Ago, Hero, JobProgress, Steps, StorageLine, Timestamp, runningLead } from './ui';
 
 const jobSteps: Record<string, [string, string][]> = {
@@ -147,6 +148,7 @@ export function DisconnectedOverview({ ctx, onImport }: { ctx: Ctx; onImport: (b
     flow.publication_matches_latest && !flow.server_url_changed;
   const [url, setUrl] = useState(publication.base_url || `http://${window.location.hostname}`);
   const [picker, setPicker] = useState(false);
+  const [policy, setPolicy] = useState(false);
   const target = state.snapshots.find(s => s.id === flow.target_snapshot_id) ?? latest;
   const servedSnapshot = state.snapshots.find(s => s.id === current?.snapshot_id);
   const publishing = !importFirst && (['publisher_setup', 'server_url', 'publish'].includes(phase) || phase === 'failed' && attention?.operation === 'publish' ||
@@ -188,7 +190,8 @@ export function DisconnectedOverview({ ctx, onImport }: { ctx: Ctx; onImport: (b
         <ImportButton ctx={ctx} bundle={bundle} info={info(bundle)} onImport={onImport} /></div>)}
     </Hero>;
   } else if (phase === 'import_policy') {
-    hero = <Hero title="Imports are turned off" lead={<>An administrator must set <code>"allow_unsigned_imports": true</code> in <code>/etc/disconnected-content/config.json</code> before this prototype can import unsigned bundles.</>}>
+    hero = <Hero title="Imports are turned off" lead="Transfer bundles from this prototype aren’t signed, so imports stay off until you allow unsigned bundles. RPM signatures are always checked."
+      actions={<Button isDisabled={busy || Boolean(active)} onClick={() => setPolicy(true)}>Allow unsigned bundles…</Button>}>
       {stepper}</Hero>;
   } else if (phase === 'source') {
     hero = <Hero tone="failed" title="Transfer folder isn't available" lead={source.error}
@@ -221,6 +224,7 @@ export function DisconnectedOverview({ ctx, onImport }: { ctx: Ctx; onImport: (b
       actions={<Button onClick={() => ctx.go('clients')}>Configure clients</Button>}>{stepper}</Hero>;
   }
   return <>
+    {policy && <UnsignedImportsDialog busy={busy} onClose={() => setPolicy(false)} onConfirm={() => { setPolicy(false); void allowUnsigned(ctx, true); }} />}
     {picker && <DirectoryPicker initialPath={source.path} isDisabled={busy || Boolean(active)} onClose={() => setPicker(false)}
       onSelect={path => { setPicker(false); void ctx.act(() => call(['save-import-settings'], { incoming_dir: path }), 'Transfer folder saved'); }} />}
     {hero}
@@ -256,7 +260,7 @@ export function Content({ ctx, onImport }: { ctx: Ctx; onImport: (bundle: { name
       <Button variant="link" isInline onClick={() => ctx.go('settings')}>Change folder</Button></span></CardTitle><CardBody>
       <p className="dc-muted"><code>{state.import_source?.path}</code> · checked <Ago value={state.import_source?.scanned_at} /></p>
       {state.import_source && !state.import_source.available && <Alert variant="warning" isInline title="Transfer folder unavailable">{state.import_source.error}</Alert>}
-      {!state.capabilities.allow_unsigned_imports && <Alert variant="info" isInline isPlain title="Imports are turned off by the administrator." />}
+      {!state.capabilities.allow_unsigned_imports && <Alert variant="info" isInline isPlain title="Imports are turned off. Allow unsigned bundles in Settings to import." />}
       {!state.incoming.length && state.import_source?.available && <p>No bundles in this folder yet.</p>}
       {state.incoming.map(bundle => {
         const [label, color] = bundleLabels[bundle.state ?? 'awaiting_import'];
@@ -326,15 +330,22 @@ function ManualKey({ ctx }: { ctx: Ctx }) {
   </div>;
 }
 
+function allowUnsigned(ctx: Ctx, allow: boolean) {
+  return ctx.act(() => call(['setup'], { role: 'disconnected', allow_unsigned_imports: allow }),
+    allow ? 'Unsigned bundles allowed' : 'Unsigned imports turned off');
+}
+
 export function Settings({ ctx }: { ctx: Ctx }) {
   const { state, busy, active } = ctx;
   const publication = state.publication!;
   const [path, setPath] = useState(state.import_source?.path ?? '');
   const [url, setUrl] = useState(publication.base_url || `http://${window.location.hostname}`);
   const [picker, setPicker] = useState(false);
+  const [policy, setPolicy] = useState(false);
   const disabled = busy || Boolean(active);
   const saveFolder = (value: string) => ctx.act(() => call(['save-import-settings'], { incoming_dir: value }), 'Transfer folder saved');
   return <Card><CardBody>
+    {policy && <UnsignedImportsDialog busy={busy} onClose={() => setPolicy(false)} onConfirm={() => { setPolicy(false); void allowUnsigned(ctx, true); }} />}
     {picker && <DirectoryPicker initialPath={path || '/'} isDisabled={disabled} onClose={() => setPicker(false)}
       onSelect={value => { setPicker(false); setPath(value); void saveFolder(value); }} />}
     <div className="dc-setting"><div><h3>Transfer folder</h3><p className="dc-muted">Where bundles arrive. Checked automatically.</p></div>
@@ -359,8 +370,11 @@ export function Settings({ ctx }: { ctx: Ctx }) {
             <td><code className="dc-wrap">{groupFingerprint(key.fingerprint)}</code></td>
             <td className="dc-muted">Approved {key.approved_at ? shortDate(key.approved_at) : 'unknown'} · {key.expires ? `expires ${shortDate(key.expires)}` : 'no expiration'}</td></tr>))}</tbody></table>}
         <details className="dc-details"><summary>Add a key manually</summary><ManualKey ctx={ctx} /></details></div></div>
-    <div className="dc-setting"><div><h3>Import policy</h3><p className="dc-muted">Set by the administrator in <code>/etc/disconnected-content/config.json</code></p></div>
+    <div className="dc-setting"><div><h3>Import policy</h3><p className="dc-muted">Saved in <code>/etc/disconnected-content/config.json</code></p></div>
       <div><p>Unsigned bundles: <strong>{state.capabilities.allow_unsigned_imports ? 'allowed (prototype)' : 'not allowed'}</strong></p>
+        <div className="dc-actions">{state.capabilities.allow_unsigned_imports ?
+          <Button variant="secondary" isDisabled={disabled} onClick={() => { void allowUnsigned(ctx, false); }}>Turn off unsigned imports</Button> :
+          <Button variant="secondary" isDisabled={disabled} onClick={() => setPolicy(true)}>Allow unsigned bundles…</Button>}</div>
         <p className="dc-muted">Bundle checksums show that the file wasn't damaged, not who made it. RPM signatures are always checked.</p></div></div>
   </CardBody></Card>;
 }

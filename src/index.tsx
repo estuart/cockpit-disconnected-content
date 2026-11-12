@@ -7,6 +7,7 @@ import { State, call, errorText } from './api';
 import { Clients } from './clients';
 import { ConnectedOverview, ConnectedSettings, Ctx, Repositories } from './connected';
 import { Content, DisconnectedOverview, ImportFlow, Settings, newBundles } from './disconnected';
+import { FirstRun } from './setup';
 import { Activity } from './ui';
 
 function PrototypeNotes({ version }: { version: string }) {
@@ -56,6 +57,19 @@ function App() {
     {error && <Alert variant="danger" isInline title="Can't reach the local engine">{error}</Alert>}
     <p>Turn on administrative access in the web console to connect to the local engine.</p>
     <Button variant="secondary" onClick={() => { setError(''); void refresh().catch(e => setError(errorText(e))); }}>Try again</Button></div></main>;
+  if (state.role !== 'connected' && state.role !== 'disconnected') return <main className="dc-app">
+    <header className="dc-header"><div>
+      <Title headingLevel="h1" size="2xl">Disconnected Content</Title>
+      <p>New installation · {state.os.name} {state.os.arch}</p></div>
+      <div className="dc-labels"><Label color="grey">Not set up</Label><PrototypeNotes version={state.version} /></div>
+    </header>
+    {error && <Alert variant="danger" title="That didn't work" isInline actionClose={<AlertActionCloseButton onClose={() => setError('')} />}><p>{error}</p></Alert>}
+    <section className="dc-content">
+      <FirstRun state={state} busy={busy} onSetup={request => {
+        void act(() => call(['setup'], request), `Set up as a ${request.role} host`);
+      }} />
+    </section>
+  </main>;
   const disconnected = state.role === 'disconnected';
   const active = state.jobs.find(j => ['queued', 'running'].includes(j.status));
   const ctx: Ctx = { state, busy, active, act, go, refresh,

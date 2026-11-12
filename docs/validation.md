@@ -411,3 +411,32 @@ saved folder record their path, and verification follows it.
 Generated playbooks are unchanged from 0.10.0 and were not rerun against a client
 in this cycle; CI checks their syntax. The live test removed and restored one
 scoped repository approval; host RPM trust was not changed.
+
+## First-run setup
+
+A fresh installation no longer defaults to the connected role. The web console
+opens on a setup step that asks whether the host is connected or disconnected,
+and the helper's `setup` command saves the choice. The same command turns the
+disconnected prototype import policy on or off from **Settings** and the
+**Imports are turned off** card, so neither role needs a hand-edited
+configuration.
+
+- Backend tests cover the following:
+  - choosing each role keeps other keys, saves a backup, and keeps mode `0644`;
+  - invalid or extra input leaves the file byte-for-byte unchanged;
+  - a configured role can't be switched, and confirming the same role is a no-op;
+  - the import policy toggles on and off;
+  - setup waits for an active job and isn't blocked by one a crash left behind;
+  - status reports `setup_hint` for hosts that already hold connected or
+    disconnected content, and whether the publisher is installed.
+- The fixture-driven browser test renders the fresh and upgraded setup states. It
+  checks the exact `setup` request for each, the confirmation before allowing
+  unsigned bundles, the switch into the chosen role's workflow, and the narrow
+  layout.
+- In a clean CentOS Stream 10 container, an RPM built from this branch:
+  - installed with a role-less configuration, in a directory now owned by the
+    package;
+  - reported no role, then took the disconnected role with unsigned imports
+    allowed through `setup` on stdin;
+  - stayed `root:root 0644`, wrote one `config.json.bak-*`, refused
+    `setup connected`, and showed the disconnected overview.

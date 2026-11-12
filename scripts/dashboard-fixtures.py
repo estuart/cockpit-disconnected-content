@@ -47,4 +47,14 @@ for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'chan
             'profile': app.profile(), 'jobs': jobs, 'snapshots': snapshots, 'incoming': [],
             'import_source': None, 'publication': None, 'connected': connected, 'export_settings': app.export_settings(),
             'capabilities': {'allow_unsigned_imports': False}}).replace(temporary, '/var/lib/disconnected-content'))
+# First run: no role yet. "setup-upgrade" is a host that already holds connected content.
+for case, hint in [('setup', None), ('setup-upgrade', 'connected')]:
+    states[case] = {'version': engine.VERSION, 'role': None, 'setup_hint': hint,
+        'os': {'name': 'RHEL 10', 'major': '10', 'arch': 'x86_64'},
+        'storage': {'path': '/var/lib/disconnected-content', 'free': 100000000000, 'total': 150000000000, 'reserve': 5000000000},
+        'repositories': [{'id': 'example-baseos', 'name': 'RHEL 10 BaseOS', 'enabled': True}],
+        'profile': {'repositories': [], 'max_gib': 20}, 'jobs': [], 'snapshots': [], 'incoming': [],
+        'import_source': None, 'publication': None, 'connected': None, 'disconnected': None, 'export_settings': None,
+        'capabilities': {'import': False, 'publish': False, 'signed_exports': False, 'allow_unsigned_imports': False,
+                         'publisher_installed': case == 'setup'}}
 print(json.dumps(states))

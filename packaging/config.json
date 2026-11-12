@@ -1,5 +1,4 @@
 {
-  "role": "connected",
   "state_dir": "/var/lib/disconnected-content",
   "reserve_gib": 5
 }
