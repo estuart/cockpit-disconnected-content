@@ -11,6 +11,11 @@ remain mandatory. This is an independently maintained prototype; running inside
 Cockpit does not create a Red Hat product support commitment. Operators remain
 responsible for subscriptions, content access, and their transfer policy.
 
+**[Try the interactive demo](https://estuart.github.io/cockpit-disconnected-content/)**
+to see the whole workflow without installing anything. It runs the plugin's real
+interface in your browser against a simulated backend, with a guided tour from
+the connected host, across the air gap, to published repositories.
+
 [Install and select a role](docs/installation.md) ·
 [Operator guide](docs/operator-guide.md) ·
 [Client automation](docs/automation-options.md) ·
