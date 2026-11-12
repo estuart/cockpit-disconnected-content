@@ -36,7 +36,8 @@ export type Disconnected = { phase: 'source' | 'waiting' | 'import_policy' | 'im
   target_snapshot_id: string | null; pending_bundles: number; known_bundles: number; client_application: 'unconfirmed';
   repositories: { id: string; snapshot_id: string; imported_at: string; repository: { packages: number; metadata_types: string[] };
     publication_state: 'current' | 'older' | 'not_published' }[] };
-export type State = { version: string; role: string; os: { name: string; major: string; arch: string };
+export type State = { version: string; role: 'connected' | 'disconnected' | null; os: { name: string; major: string; arch: string };
+  setup_hint?: 'connected' | 'disconnected' | null;
   storage: { path: string; free: number; total: number; reserve: number };
   repositories: Repo[]; profile: { repositories: string[]; max_gib: number };
   jobs: Job[]; snapshots: Snapshot[]; incoming: IncomingBundle[];
@@ -46,7 +47,7 @@ export type State = { version: string; role: string; os: { name: string; major: 
     availability: { state: 'not_published' | 'available' | 'unavailable'; reason: string } } | null;
   connected: Connected | null; disconnected: Disconnected | null;
   export_settings?: { path: string; default: boolean; available: boolean; error?: string; free?: number; updated_at?: string } | null;
-  capabilities: { allow_unsigned_imports: boolean } };
+  capabilities: { allow_unsigned_imports: boolean; publisher_installed?: boolean } };
 export type DirectoryListing = { path: string; parent: string | null; truncated: boolean;
   directories: { name: string; path: string }[];
   locations: { label: string; path: string; kind: 'folder' | 'mount' }[] };

@@ -50,10 +50,9 @@ flowchart LR
     P --> H[RHEL clients inside the air gap]
 ```
 
-Today, installation uses DNF and role configuration; there is no role-selecting
-installer script. We recommend retaining one application RPM and the optional
-publisher, then adding a setup command with an explicit role choice. See the
-[current packaging and proposed setup interface](docs/deployment-design.md).
+Installation uses DNF, then a one-time setup step in the web console that asks
+whether the host is connected or disconnected. See
+[packaging and setup](docs/deployment-design.md).
 
 ## Get started
 
@@ -65,11 +64,11 @@ publisher, then adding a setup command with an explicit role choice. See the
 2. **Install the main RPM on both hosts**, and the optional publisher only where
    repositories will be served. Provision all runtime dependencies before
    isolating the disconnected host, or use an approved offline bootstrap repository.
-3. **Choose the role and storage** in the root-owned configuration. A fresh
-   installation defaults to connected mode; set the disconnected host explicitly.
-   Review the separate unsigned-manifest prototype opt-in before enabling imports.
-4. Enable `cockpit.socket`, open your host's web console, and select
-   **Disconnected Content** with administrative access.
+3. **Enable the web console** with `sudo systemctl enable --now cockpit.socket`,
+   open it, and select **Disconnected Content** with administrative access.
+4. **Choose the role** when the setup step asks: connected or disconnected. On the
+   disconnected host, review the prototype opt-in for unsigned transfer bundles
+   before turning on imports.
 5. Start with one small repository, complete the workflow below, and configure a
    canary client before expanding the rollout.
 
@@ -176,7 +175,7 @@ customer systems or actual keys to trust. See [screenshot regeneration](docs/dev
 
 - [Installation and role configuration](docs/installation.md)
 - [Operator procedures and troubleshooting](docs/operator-guide.md)
-- [Packaging decision and proposed setup command](docs/deployment-design.md)
+- [Packaging and setup](docs/deployment-design.md)
 - [Backend architecture and trust boundaries](docs/architecture.md)
 - [Validation evidence and tested boundaries](docs/validation.md)
 - [Prototype limitations](docs/limitations.md)

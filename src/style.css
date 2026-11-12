@@ -168,3 +168,13 @@ code { overflow-wrap: anywhere; }
   .dc-picker-layout { grid-template-columns: 1fr; }
   .dc-table { min-width: 520px; }
 }
+.dc-choices { margin: 4px 0 18px; }
+.dc-choice { display: flex; gap: 12px; align-items: flex-start; padding: 18px 20px; cursor: pointer;
+  border: 1px solid var(--pf-t--global--border--color--default); border-radius: 16px; }
+.dc-choice input { margin-top: 4px; }
+.dc-choice-selected { outline: 2px solid var(--pf-t--global--color--brand--default); outline-offset: -2px; }
+.dc-choice-body { display: grid; gap: 4px; }
+.dc-choice-title { font-size: 17px; font-weight: 600; }
+.dc-choice-body ul { margin: 6px 0 0; padding-inline-start: 18px; list-style: disc; }
+.dc-choice-extra { display: grid; gap: 12px; margin: 0 0 16px; }
+.dc-setup-note { margin: 0 0 16px; }

@@ -159,22 +159,16 @@ Install the application and its runtime dependencies before isolating the host,
 or provide them through an approved offline bootstrap repository. The importer
 does not download packages or require access to the sync host.
 
-Configure the root-owned `/etc/disconnected-content/config.json` for this role:
+The first time you open **Disconnected Content**, choose **Disconnected host** in
+the setup step. Size limits such as `max_import_gib` stay in the root-owned
+`/etc/disconnected-content/config.json`.
 
-```json
-{
-  "role": "disconnected",
-  "state_dir": "/var/lib/disconnected-content",
-  "reserve_gib": 5,
-  "max_import_gib": 200,
-  "allow_unsigned_imports": false
-}
-```
-
-This version produces unsigned bundles. Import is rejected by default. For an
-explicitly approved prototype test, set `allow_unsigned_imports` to `true` as an
-administrator. This does not authenticate the manifest; RPM signatures are still
-required and validated against approved repository keys or the existing host keyring.
+This version produces unsigned bundles, so import is turned off until you allow
+it. For an explicitly approved prototype test, check **Allow imports of unsigned
+transfer bundles** during setup, or later use **Allow unsigned bundles…** in
+**Settings → Import policy** and confirm. This does not authenticate the manifest;
+RPM signatures are still required and validated against approved repository keys
+or the existing host keyring. **Turn off unsigned imports** reverses it.
 
 1. Open **Settings → Transfer folder → Browse…** and navigate to the transfer
    folder on the disconnected host. Mounted drives appear under **Mounted
@@ -206,7 +200,9 @@ snapshot. Publishing and client rollout are explicit subsequent steps.
 
 The source directory is separate from managed snapshot storage. The GUI saves
 only `incoming_dir` and its settings timestamp in the root-owned configuration;
-it cannot change the role, state directory, size limits, or unsigned-import policy.
+it cannot change the state directory or size limits. The role and the
+unsigned-import policy change only through the separate setup command, which
+refuses to switch an already configured role.
 Saving does not create, move, delete, or change permissions on source files.
 It requires administrative access and is blocked while a job is active. Each
 import records its selected source directory in the job. Missing media is shown

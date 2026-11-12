@@ -2,9 +2,10 @@
 
 The Cockpit page uses the documented `cockpit.spawn` API to call a root-owned
 helper. Each call uses an argument array and requires administrative access.
-The helper reads a root-owned configuration file at a fixed path. An administrator
-can save only a local import source directory through the GUI; destination
-storage and trust policy remain in administrator-managed configuration. Browser
+The helper reads a root-owned configuration file at a fixed path. Through the GUI
+an administrator can choose the host's role once, turn the disconnected prototype
+import policy on or off, and save transfer folders and the client-facing address.
+Destination storage, size limits, and key trust stay outside those settings. Browser
 requests cannot choose an executable or a download-source URL. Publication
 settings accept a validated HTTP(S) origin used in generated client files; the
 helper does not connect to that origin.

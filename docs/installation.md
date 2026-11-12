@@ -11,11 +11,14 @@ version and architecture for a connected/disconnected content pair and its clien
 | `cockpit-disconnected-content` | Both UI modes, Python engine, systemd worker unit, and root-owned configuration | Connected mirror and disconnected import hosts |
 | `cockpit-disconnected-content-publisher` | Apache configuration, public content directories, and dependencies on Apache/SELinux tools | Disconnected hosts that will serve repositories |
 
-The main package defaults to `"role": "connected"`. The publisher subpackage does
-not switch roles. It requires the same version and release of the main package.
-There is no role-selecting install script in this version. DNF installs packages;
-`/etc/disconnected-content/config.json` selects the mode. Backend commands enforce
-that role; hiding UI tabs is not the access-control mechanism.
+A fresh installation has no role. The first time you open **Disconnected Content**
+in the web console, it asks whether this is a connected or a disconnected host, and
+saves the answer in `/etc/disconnected-content/config.json`. The publisher
+subpackage doesn't choose a role. It requires the same version and release of the
+main package. Backend commands enforce the role; hiding UI tabs is not the
+access-control mechanism.
+
+![First-run setup with Disconnected host selected](screenshots/first-run-setup.png)
 
 ## Download the packages
 
@@ -53,33 +56,20 @@ keys. The application does not register the system or obtain subscription rights
 
 ```sh
 sudo dnf install ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm
-sudoedit /etc/disconnected-content/config.json
-```
-
-For a new host, the configuration can be:
-
-```json
-{
-  "role": "connected",
-  "state_dir": "/var/lib/disconnected-content",
-  "reserve_gib": 5
-}
-```
-
-Keep any existing custom settings when editing an already configured host.
-Then check ownership and enable the existing web console:
-
-```sh
-sudo chown root:root /etc/disconnected-content/config.json
-sudo chmod 0644 /etc/disconnected-content/config.json
 sudo systemctl enable --now cockpit.socket
-sudo /usr/libexec/disconnected-content status
 ```
 
 Open `https://connected.example.org:9090`, sign in with a normal system account
-that can obtain administrative access, and select **Disconnected Content**. The
-extension does not create a separate username or password. Access to the web
+that can obtain administrative access, and select **Disconnected Content**. Choose
+**Connected host** and select **Set up as a connected host**.
+
+The extension does not create a separate username or password. Access to the web
 console and TCP port 9090 follows your existing certificate and firewall policy.
+To set up from a shell instead, for example from automation, run:
+
+```sh
+sudo /usr/libexec/disconnected-content setup connected
+```
 
 Start with a small configured repository and conservative snapshot budget.
 
@@ -103,27 +93,19 @@ sudo dnf install \
   ./cockpit-disconnected-content-publisher-0.11.0-1.el10.noarch.rpm
 ```
 
-Edit `/etc/disconnected-content/config.json` before the first operation:
+Enable the web console with `sudo systemctl enable --now cockpit.socket`, open
+`https://disconnected.example.org:9090`, and select **Disconnected Content**.
+Choose **Disconnected host**. The setup step shows whether the publisher is
+installed and offers one more choice:
 
-```json
-{
-  "role": "disconnected",
-  "state_dir": "/var/lib/disconnected-content",
-  "reserve_gib": 5,
-  "max_import_gib": 200,
-  "allow_unsigned_imports": false
-}
-```
+- **Allow imports of unsigned transfer bundles (prototype).** This refers to
+  **unsigned transfer manifests**, not unsigned RPM packages. Imports stay off
+  until you allow it. RPM signatures are always checked; this setting never
+  bypasses package signature validation. You can change it later in **Settings →
+  Import policy**, or from the **Imports are turned off** card on the overview.
 
-`allow_unsigned_imports` refers to **unsigned transfer manifests**, not unsigned
-RPM packages. Imports are disabled by default in this prototype. For an explicitly
-approved prototype evaluation, set this field to `true`. RPM signatures are still
-mandatory; this setting never bypasses package signature validation.
-
-Apply the same configuration ownership, permissions, and `cockpit.socket` setup
-shown for the connected host. Open `https://disconnected.example.org:9090`.
-Confirm the UI shows **Disconnected host** and the status output reports the
-expected role and storage directory before starting work.
+From a shell, `sudo /usr/libexec/disconnected-content setup disconnected` chooses
+the role with imports turned off.
 
 Choose the transfer directory in **Settings → Transfer folder → Browse…**; picking
 a folder saves it. Mounting media and copying files are separate administrator
@@ -182,11 +164,20 @@ packages together to matching version/release. The root configuration uses RPM
 Package upgrades do not migrate content directories or adopt newly published
 content on client hosts.
 
-Role changes are manual in this version. Stop or finish active work first and
-plan the change around existing state. Changing a string does not move content,
+Versions up to 0.11.0 shipped a configuration with `"role": "connected"`. If a host
+never changed that file, RPM replaces it with the new role-less default during the
+upgrade. The next time you open the extension, the setup step appears with the
+role it detects from existing content already selected. Snapshots, exports, and
+approvals stay where they are. Confirm the role to continue.
+
+The role is chosen once. The setup step refuses to switch an already configured
+host to the other role, and every change it makes first saves a timestamped copy
+of the previous file as `config.json.bak-*` in the same directory. Role changes
+are manual in this version. Stop or finish active work first and plan the change
+around existing state. Changing a string does not move content,
 undo a publication, enable subscriptions, or create a network air gap. The
 recommended deployment uses separate hosts with roles selected before first use.
 
-See [the packaging decision](deployment-design.md) for the proposed setup command
-and future safeguards. See [operator procedures](operator-guide.md) for the
+See [the packaging decision](deployment-design.md) for how setup works and the
+safeguards it applies. See [operator procedures](operator-guide.md) for the
 complete sync, key review, import, publication, and client workflow.

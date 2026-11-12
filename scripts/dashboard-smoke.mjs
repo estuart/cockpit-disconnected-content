@@ -54,11 +54,45 @@ try {
     }, { state: fixture, info: bundleInfo });
     await page.goto(url);
     const hero = page.locator('.dc-hero-title').first();
-    if (fixture.role === 'disconnected') {
+    if (fixture.role == null) {
+      await expect(hero).toHaveText('Set up this host');
+      await expect(page.getByRole('tab')).toHaveCount(0);
+      const choose = page.getByRole('button', { name: /^(Choose a role to continue|Set up as a)/ });
+      if (name === 'setup') {
+        await expect(choose).toBeDisabled();
+        await page.getByRole('radio', { name: /^Disconnected host/ }).check();
+        await expect(page.getByText(/The web publisher is installed/)).toBeVisible();
+        await page.getByRole('checkbox', { name: /Allow imports of unsigned transfer bundles/ }).check();
+        await page.getByRole('button', { name: 'Set up as a disconnected host', exact: true }).click();
+        await expect.poll(async () => (await calls(page)).find(call => call[0] === 'input' && call[1] === 'setup')?.[2])
+          .toEqual({ role: 'disconnected', allow_unsigned_imports: true });
+        await mkdir('.local', { recursive: true });
+        await page.screenshot({ path: '.local/first-run-fixture.png', fullPage: true });
+      } else {
+        // A host upgraded from an older version keeps its content and gets its old role pre-selected.
+        await expect(page.getByText('This host already has connected content')).toBeVisible();
+        await expect(page.getByRole('radio', { name: /^Connected host/ })).toBeChecked();
+        await page.getByRole('button', { name: 'Set up as a connected host', exact: true }).click();
+        await expect.poll(async () => (await calls(page)).find(call => call[0] === 'input' && call[1] === 'setup')?.[2])
+          .toEqual({ role: 'connected' });
+      }
+      await page.setViewportSize({ width: 390, height: 1100 });
+      const widths = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth }));
+      expect(widths.scroll, `${name} fits a narrow screen`).toBeLessThanOrEqual(widths.width + 1);
+      await page.setViewportSize({ width: 1400, height: 1100 });
+    } else if (fixture.role === 'disconnected') {
       const caseName = name.replace('disconnected-', '');
       await expect(hero).toHaveText(disconnectedTitles[caseName]);
       await expect(page.getByRole('list', { name: 'Disconnected workflow' })).toBeVisible();
       if (caseName === 'waiting') await expect(page.locator('.dc-steps [aria-current=step]')).toContainText('Import');
+      if (caseName === 'policy') {
+        // Turning on unsigned imports asks for confirmation first.
+        await page.getByRole('button', { name: 'Allow unsigned bundles…', exact: true }).click();
+        expect((await calls(page)).some(call => call[1] === 'setup')).toBe(false);
+        await page.getByRole('dialog').getByRole('button', { name: 'Allow unsigned bundles', exact: true }).click();
+        await expect.poll(async () => (await calls(page)).find(call => call[0] === 'input' && call[1] === 'setup')?.[2])
+          .toEqual({ role: 'disconnected', allow_unsigned_imports: true });
+      }
       if (caseName.startsWith('running')) {
         await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
         await expect(page.locator('.dc-steps [aria-current=step]')).toContainText(caseName.endsWith('publish') ? 'Publish' : 'Import');
@@ -186,7 +220,28 @@ try {
     expect(errors).toEqual([]);
     await page.close();
   }
-  console.log('Ten connected and twenty-one disconnected workflow states, scoped actions, auto-saved selection, downloads, and responsive layouts passed');
+  // Finishing setup switches straight to the chosen role's workflow.
+  const page = await browser.newPage({ viewport: { width: 1400, height: 1100 } });
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.addInitScript(({ first, next }) => {
+    let state = first;
+    window.testCalls = [];
+    window.cockpit = { spawn(args) {
+      window.testCalls.push(args.slice(1));
+      const result = Promise.resolve(JSON.stringify(args[1] === 'status' ? state : {}));
+      result.input = input => { window.testCalls.push(['input', args[1], JSON.parse(input)]); if (args[1] === 'setup') state = next; };
+      return result;
+    } };
+  }, { first: fixtures.setup, next: fixtures.select });
+  await page.goto(url);
+  await page.getByRole('radio', { name: /^Connected host/ }).check();
+  await page.getByRole('button', { name: 'Set up as a connected host', exact: true }).click();
+  await expect(page.locator('.dc-hero-title').first()).toHaveText(connectedTitles.select);
+  await expect(page.locator('.pf-v6-c-alert__title')).toContainText('Set up as a connected host');
+  expect(errors).toEqual([]);
+  await page.close();
+  console.log('Ten connected, two first-run, and twenty-one disconnected workflow states, setup, scoped actions, auto-saved selection, downloads, and responsive layouts passed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

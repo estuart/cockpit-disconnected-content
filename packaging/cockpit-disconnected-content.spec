@@ -53,6 +53,7 @@ or enable the server until an administrator publishes a snapshot through Cockpit
 %files
 %license LICENSE
 %doc README.md docs/
+%dir /etc/disconnected-content
 %config(noreplace) /etc/disconnected-content/config.json
 %{_libexecdir}/disconnected-content
 %{_datadir}/cockpit/disconnected-content/
