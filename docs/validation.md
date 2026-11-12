@@ -469,3 +469,53 @@ Python, which on RHEL 8 is 3.6. The helper reads each repository's key sources f
 - **Not tested here.** Containers don't run systemd, SELinux, or Cockpit, so the job
   service, the web console, and a full sync, import, and publish on RHEL 8 and 9 are
   left for lab validation.
+
+## Offline installer
+
+Version 0.12.0 adds an offline installer that the connected host builds for a
+disconnected host of the same RHEL release and architecture. It contains this
+version's RPMs, the dependency closure, repository metadata, `SHA256SUMS`, a
+README, and `install.sh`.
+
+- **Backend tests** cover:
+  - the archive layout, root ownership, and the executable `install.sh`;
+  - `SHA256SUMS` matching every member, and the sidecar matching the archive;
+  - the `install.sh` template being fully filled in;
+  - DNF resolving from an empty install root with the host's release version;
+  - signature checks on every dependency;
+  - downloads from the fixed release URL being checked against `SHA256SUMS`, and
+    a mismatch rejected;
+  - an unreachable GitHub naming the transfer-folder fallback;
+  - RPM headers that don't match their file names being rejected;
+  - a missing `createrepo_c` being explained;
+  - no partial files left after a failure;
+  - the summary noticing a moved or changed installer;
+  - the build being limited to connected hosts;
+  - an installer name never matching the import scanner's bundle pattern.
+- **Browser tests** render the installer card ready, running, and failed. They
+  check the build request, and that a failed installer doesn't take over the main
+  bundle workflow.
+- **End to end in containers** (aarch64), with RPMs built from this branch on each
+  release. In a connected container, the job ran directly, with the RPMs in the
+  transfer folder. A fresh container of the same release, with networking
+  disabled, then ran `install.sh --with-publisher`:
+
+  | Release | Dependencies | Archive | Installed offline | Helper |
+  | --- | --- | --- | --- | --- |
+  | AlmaLinux 8.10 | 210 | 119 MiB | 62 packages, including `python3.12` and the `httpd` module | Python 3.12 |
+  | AlmaLinux 9 | 192 | 84 MiB | 43 packages | Python 3.9 |
+  | CentOS Stream 10 | 181 | 85 MiB | 53 packages | Python 3.12 |
+
+  - **Signatures and status:** DNF imported the distribution key and checked every
+    dependency. On each release, `status` then reported 0.12.0 with no role and the
+    publisher present.
+  - **RHEL 8 modules:** the first RHEL 8 run found that DNF refuses modular
+    packages such as `httpd` from a repository without module metadata, so
+    `install.sh` now sets `module_hotfixes` on its local repository. The connected
+    host already resolved those packages from its default module streams.
+  - **Tampering:** after one dependency RPM was changed, `install.sh` stopped at the
+    `SHA256SUMS` check before running DNF.
+- **Not tested here:** containers don't run systemd, so `install.sh` couldn't start
+  `cockpit.socket` there, and the job ran without its service unit. The job
+  service, a GitHub download of a published release, and real RHEL hosts with
+  subscription-managed repositories are left for lab validation.

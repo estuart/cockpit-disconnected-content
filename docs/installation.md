@@ -45,7 +45,7 @@ For a disconnected host, download the RPMs and `SHA256SUMS` on a connected machi
 Check them there, then carry them across with your approved transfer process.
 
 To build the packages yourself, follow [the development guide](development.md). The
-examples below use version 0.11.0, release 1 for RHEL 10. On RHEL 8 or 9, use the
+examples below use version 0.12.0, release 1 for RHEL 10. On RHEL 8 or 9, use the
 `.el8` or `.el9` files instead. The two packages must match.
 
 Install the main package explicitly. Avoid a wildcard such as
@@ -59,7 +59,7 @@ DNF must already have repository access and the necessary trusted package-signin
 keys. The application does not register the system or obtain subscription rights.
 
 ```sh
-sudo dnf install ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm
+sudo dnf install ./cockpit-disconnected-content-0.12.0-1.el10.noarch.rpm
 sudo systemctl enable --now cockpit.socket
 ```
 
@@ -79,26 +79,74 @@ Start with a small configured repository and conservative snapshot budget.
 
 ## Disconnected import host
 
-Install the main package and all dependencies before isolation, or from an
-approved offline bootstrap repository. The transferred content bundles are not an
-installer for Cockpit, this extension, or its runtime dependencies.
+The easiest way to install a host that has no network access is the offline
+installer built by the connected host. You can also install the packages before
+the host is isolated, or from an approved offline repository. Content bundles
+aren't installers for Cockpit, this extension, or its runtime dependencies.
+
+### Offline installer (recommended)
+
+On the connected host, open **Overview → Offline installer for the disconnected
+host** and select **Build offline installer**. The connected host and the
+disconnected host must run the same RHEL major release on the same architecture.
+The job:
+
+1. Gets this version's RPMs, main and publisher. It downloads them from the
+   matching GitHub release and checks them against that release's `SHA256SUMS`.
+   If the connected host can't reach GitHub, copy the two RPMs for the installed
+   version into the transfer folder and build again.
+2. Resolves everything a freshly installed host would need, including Cockpit,
+   Python, and Apache for the publisher. It downloads these from the connected
+   host's own repositories.
+3. Checks every dependency's RPM signature against the connected host's keyring.
+4. Writes `disconnected-content-installer-<version>-<arch>.tar.gz` and a
+   `.sha256` file to the transfer folder, and verifies the archive first.
+
+The installer is roughly 100 MB. Its `.tar.gz` name keeps the disconnected host
+from mistaking it for a content bundle. Carry both files across, then on the
+disconnected host:
+
+```sh
+sha256sum -c disconnected-content-installer-*.tar.gz.sha256
+tar -xzf disconnected-content-installer-*.tar.gz
+cd disconnected-content-installer-*/
+sudo ./install.sh --with-publisher
+```
+
+Leave out `--with-publisher` on a host that only imports. `install.sh` does the
+following:
+- refuses a different RHEL release or architecture;
+- checks every file against `SHA256SUMS`;
+- installs only the packages the host is missing, with all other repositories
+  disabled and DNF checking the Red Hat signatures on every dependency;
+- enables `cockpit.socket`.
+
+The extension's own RPMs aren't GPG-signed yet; `SHA256SUMS` covers them. If the
+connected host has third-party repositories enabled and DNF resolves a
+dependency from one of them, the disconnected host needs that repository's
+signing key in `/etc/pki/rpm-gpg/`.
+
+### Install the packages directly
 
 For import without HTTP publication:
 
 ```sh
-sudo dnf install ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm
+sudo dnf install ./cockpit-disconnected-content-0.12.0-1.el10.noarch.rpm
 ```
 
 For import and HTTP publication:
 
 ```sh
 sudo dnf install \
-  ./cockpit-disconnected-content-0.11.0-1.el10.noarch.rpm \
-  ./cockpit-disconnected-content-publisher-0.11.0-1.el10.noarch.rpm
+  ./cockpit-disconnected-content-0.12.0-1.el10.noarch.rpm \
+  ./cockpit-disconnected-content-publisher-0.12.0-1.el10.noarch.rpm
 ```
 
-Enable the web console with `sudo systemctl enable --now cockpit.socket`, open
-`https://disconnected.example.org:9090`, and select **Disconnected Content**.
+### Set up the disconnected host
+
+If you installed the packages directly, enable the web console with
+`sudo systemctl enable --now cockpit.socket`. Then open
+`https://disconnected.example.org:9090` and select **Disconnected Content**.
 Choose **Disconnected host**. The setup step shows whether the publisher is
 installed and offers one more choice:
 
@@ -124,12 +172,11 @@ Provision the complete dependency closure for the target RHEL release and
 architecture. An already installed package on a staging host does not establish
 that a fresh offline host has it.
 
-Preferred evaluation path: install dependencies while the future disconnected
-host still has approved repository access, then apply isolation. For an already
-isolated host, build or use an approved offline bootstrap repository with the
-matching dependency RPMs. Do not disable package-signature checks to compensate
-for missing bootstrap dependencies or keys. No automated bootstrap-media builder
-is included yet.
+The offline installer provides this closure. Without it, install the
+dependencies while the future disconnected host still has approved repository
+access, then apply isolation, or use an approved offline repository with the
+matching dependency RPMs. Don't disable package-signature checks to make up for
+missing dependencies or keys.
 
 Runtime hosts do not need Node.js or npm. Ansible is not required on the publisher
 for generating downloads; it is required on the separate control node when the

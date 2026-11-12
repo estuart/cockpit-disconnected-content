@@ -30,7 +30,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener, url2pathname
 import xml.etree.ElementTree as ET
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 CONFIG = Path("/etc/disconnected-content/config.json")
 MOUNTS = Path("/proc/self/mounts")
 PUBLISH_ROOT = Path("/var/www/disconnected-content")
@@ -45,6 +45,10 @@ NS_COMMON = "{http://linux.duke.edu/metadata/common}"
 FINGERPRINT = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
 KEY_LIMIT = 65536
 ROLES = ("connected", "disconnected")
+# Release assets are fetched from this fixed location for the installed version; requests never choose a URL.
+RELEASE_DOWNLOADS = "https://github.com/estuart/cockpit-disconnected-content/releases/download"
+INSTALLER_PACKAGES = ("cockpit-disconnected-content", "cockpit-disconnected-content-publisher")
+CREATEREPO = "/usr/bin/createrepo_c"
 
 
 def public_key_blocks(text):
@@ -150,6 +154,147 @@ def read_public_key_source(value):
     if len(raw) > 1024 * 1024:
         raise ValueError("Configured signing-key source exceeds 1 MiB")
     return public_key_blocks(raw.decode('ascii'))
+
+
+class HttpsOnlyRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, target):
+        parsed = urlsplit(target)
+        if parsed.scheme != 'https' or parsed.username is not None or parsed.password is not None:
+            raise ValueError("Download redirects must use HTTPS without credentials")
+        return super().redirect_request(request, fp, code, message, headers, target)
+
+
+def fetch_https(url, dest, limit):
+    """Stream an HTTPS download to dest, stopping past limit bytes. Returns its SHA-256.
+
+    Proxies come from the usual https_proxy environment variable."""
+    checksum, size = hashlib.sha256(), 0
+    with build_opener(HTTPSHandler(), HttpsOnlyRedirect()).open(Request(url), timeout=60) as stream, open(dest, "wb") as out:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(block)
+            if size > limit:
+                raise ValueError(f"Download is larger than expected: {url}")
+            checksum.update(block)
+            out.write(block)
+    return checksum.hexdigest()
+
+
+def parse_sha256sums(text):
+    sums = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([a-f0-9]{64}) [ *]([A-Za-z0-9][A-Za-z0-9_.+-]*)", line.strip())
+        if match:
+            sums[match.group(2)] = match.group(1)
+    return sums
+
+
+INSTALLER_SCRIPT = r"""#!/bin/bash
+# Installs Disconnected Content for Cockpit from this folder, without network access.
+# Usage: sudo ./install.sh [--with-publisher]
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")"
+publisher=0
+for arg in "$@"; do
+  case "$arg" in
+    --with-publisher) publisher=1 ;;
+    -h|--help) echo "Usage: sudo ./install.sh [--with-publisher]"; exit 0 ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+[ "$(id -u)" -eq 0 ] || { echo "Run this as root: sudo ./install.sh" >&2; exit 1; }
+. /etc/os-release
+major="${VERSION_ID%%.*}"
+arch="$(uname -m)"
+if [ "$major" != "@MAJOR@" ] || [ "$arch" != "@ARCH@" ]; then
+  echo "This installer is for RHEL @MAJOR@ on @ARCH@. This host is $PRETTY_NAME on $arch." >&2
+  exit 1
+fi
+echo "Checking the installer files..."
+sha256sum --quiet --strict -c SHA256SUMS
+# Dependencies are Red Hat signed; DNF checks them against the release key this host already has.
+keys="file:///etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"
+[ -f /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release ] || keys="$(printf 'file://%s ' /etc/pki/rpm-gpg/RPM-GPG-KEY-*)"
+packages=("$PWD/plugin/@MAIN@")
+[ "$publisher" = 1 ] && packages+=("$PWD/plugin/@PUBLISHER@")
+# The plugin packages aren't signed yet; SHA256SUMS above covers them. module_hotfixes lets RHEL 8
+# install modular packages such as httpd from this repository, which has no module metadata; the
+# connected host already resolved them from its default module streams.
+dnf -y --disablerepo='*' \
+  --repofrompath="dc-installer,file://$PWD/deps" \
+  --setopt=dc-installer.gpgcheck=1 \
+  --setopt=dc-installer.module_hotfixes=1 \
+  --setopt="dc-installer.gpgkey=$keys" \
+  --setopt=install_weak_deps=False \
+  install "${packages[@]}"
+if ! systemctl enable --now cockpit.socket; then
+  echo "Installed, but cockpit.socket didn't start. Start it with: systemctl enable --now cockpit.socket" >&2
+fi
+echo
+echo "Installed. Open https://$(hostname -f 2>/dev/null || uname -n):9090, select Disconnected Content,"
+echo "and choose Disconnected host."
+"""
+
+INSTALLER_README = """Offline installer for Disconnected Content for Cockpit @RELEASE@
+Target: RHEL @MAJOR@ on @ARCH@. Built on @BUILT@ from @SOURCE@.
+
+This folder installs the web console extension and everything it needs on a
+host with no network access. Only packages the host doesn't already have are
+installed.
+
+1. Copy the .tar.gz and its .sha256 file to the disconnected host, then check:
+     sha256sum -c disconnected-content-installer-*.tar.gz.sha256
+2. Unpack it and run the installer as root:
+     tar -xzf disconnected-content-installer-*.tar.gz
+     cd disconnected-content-installer-*/
+     sudo ./install.sh                    # import only
+     sudo ./install.sh --with-publisher   # import and serve repositories to clients
+3. Open https://<this host>:9090, select Disconnected Content, and choose
+   Disconnected host.
+
+Contents:
+  plugin/     the extension's RPMs (not GPG-signed yet; SHA256SUMS covers them)
+  deps/       @COUNT@ dependency RPMs with repository metadata (Red Hat signed;
+              DNF checks their signatures during installation)
+  SHA256SUMS  checksums for every file; install.sh checks them first
+"""
+
+
+def write_installer_archive(work, members, sums, dest, top):
+    """Write work/members as dest (.tar.gz), verified against sums before it appears. Returns its SHA-256."""
+    partial = dest.with_name(dest.name + ".partial")
+    try:
+        with tarfile.open(partial, "w:gz", compresslevel=1) as archive:
+            for name in members:
+                path = work / name
+                info = archive.gettarinfo(str(path), arcname=f"{top}/{name}")
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                info.mode = 0o755 if name == "install.sh" else 0o644
+                with path.open("rb") as stream:
+                    archive.addfile(info, stream)
+        seen = {}
+        with tarfile.open(partial, "r:gz") as archive:
+            for member in archive:
+                prefix, _, name = member.name.partition("/")
+                if prefix != top or not member.isfile() or name in seen:
+                    raise ValueError("Installer archive contains an unexpected entry")
+                checksum = hashlib.sha256()
+                stream = archive.extractfile(member)
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    checksum.update(block)
+                seen[name] = checksum.hexdigest()
+        if seen != sums:
+            raise ValueError("Installer archive failed verification")
+        checksum = digest(partial)
+        os.replace(partial, dest)
+        sidecar = dest.with_name(dest.name + ".sha256")
+        temporary = sidecar.with_name("." + sidecar.name + ".partial")
+        temporary.write_text(f"{checksum}  {dest.name}\n")
+        os.replace(temporary, sidecar)
+        return checksum
+    finally:
+        if partial.exists():
+            partial.unlink()
 
 
 def explain_reposync_failure(log):
@@ -394,6 +539,33 @@ def metadata_stream(path):
         raise ValueError(f"Unsupported primary metadata compression: {path.suffix}")
 
 
+def check_rpm_signatures(package_paths, signing_keys=None):
+    """Require valid RPM signatures from the pinned keys, or from the host keyring when none are pinned."""
+    with rpm_key_database(signing_keys or []) as key_args:
+        for offset in range(0, len(package_paths), 100):
+            checked = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", *package_paths[offset:offset+100]],
+                                     capture_output=True, text=True, check=False,
+                                     env={**os.environ, "LC_ALL": "C"})
+            lines = checked.stdout.splitlines()
+            if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
+                    line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
+                diagnostic = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", "--verbose",
+                    *package_paths[offset:offset+100]], capture_output=True, text=True,
+                    env={**os.environ, "LC_ALL": "C"})
+                details = (diagnostic.stdout + "\n" + diagnostic.stderr).strip()
+                if re.search(r"\bBAD\b|\bNOT OK\b", details):
+                    code, message = "invalid_signature", "Package signature or digest verification failed; replace the affected package"
+                elif "NOKEY" in details:
+                    code, message = "missing_key", "Missing signing key; review the package key ID and approve its public key before retrying"
+                elif "NOTTRUSTED" in details:
+                    code, message = "untrusted_key", "Signature rejected by RPM trust or system crypto policy; review the diagnostic"
+                elif not checked.returncode and any(line.endswith(": digests OK") for line in lines):
+                    code, message = "unsigned_package", "Unsigned RPM package; signed packages are required"
+                else:
+                    code, message = "verification_failed", "Signature verification failed; review the RPM diagnostic"
+                raise SignatureError(code, message, details)
+
+
 def validate_repository(root, require_updateinfo=False, check_signatures=True, include_files=False, signing_keys=None):
     root = Path(root).resolve()
     files = {"repodata/repomd.xml"}
@@ -443,29 +615,7 @@ def validate_repository(root, require_updateinfo=False, check_signatures=True, i
     if not count:
         raise ValueError("Repository contains no RPM packages")
     if check_signatures:
-        with rpm_key_database(signing_keys or []) as key_args:
-            for offset in range(0, len(package_paths), 100):
-                checked = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", *package_paths[offset:offset+100]],
-                                         capture_output=True, text=True, check=False,
-                                         env={**os.environ, "LC_ALL": "C"})
-                lines = checked.stdout.splitlines()
-                if checked.returncode or len(lines) != len(package_paths[offset:offset+100]) or any(
-                        line.rsplit(": ", 1)[-1] not in {"digests signatures OK", "signatures OK"} for line in lines):
-                    diagnostic = subprocess.run(["/usr/bin/rpmkeys", *key_args, "--checksig", "--verbose",
-                        *package_paths[offset:offset+100]], capture_output=True, text=True,
-                        env={**os.environ, "LC_ALL": "C"})
-                    details = (diagnostic.stdout + "\n" + diagnostic.stderr).strip()
-                    if re.search(r"\bBAD\b|\bNOT OK\b", details):
-                        code, message = "invalid_signature", "Package signature or digest verification failed; replace the affected package"
-                    elif "NOKEY" in details:
-                        code, message = "missing_key", "Missing signing key; review the package key ID and approve its public key before retrying"
-                    elif "NOTTRUSTED" in details:
-                        code, message = "untrusted_key", "Signature rejected by RPM trust or system crypto policy; review the diagnostic"
-                    elif not checked.returncode and any(line.endswith(": digests OK") for line in lines):
-                        code, message = "unsigned_package", "Unsigned RPM package; signed packages are required"
-                    else:
-                        code, message = "verification_failed", "Signature verification failed; review the RPM diagnostic"
-                    raise SignatureError(code, message, details)
+        check_rpm_signatures(package_paths, signing_keys)
     result = {"packages": count, "package_bytes": total, "metadata_types": sorted(metadata_types),
               "rpm_signatures_verified": check_signatures}
     if include_files:
@@ -819,7 +969,8 @@ class Engine:
         self.root = self.root.resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.floor = self.config.get("reserve_gib", 5) * GIB
-        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports", "key-reviews", "trusted-keys", "bundle-key-candidates"):
+        for sub in ("jobs", "snapshots", "exports", "export-records", "import-records", "incoming", ".imports", "key-reviews", "trusted-keys", "bundle-key-candidates",
+                    "installers", "installer-records"):
             (self.root / sub).mkdir(exist_ok=True, mode=0o700)
 
     def scan_bundle_keys(self, data):
@@ -1616,6 +1767,7 @@ class Engine:
                 "publication": publication, "disconnected": disconnected,
                 "connected": connected,
                 "export_settings": self.export_settings() if self.config.get("role") == "connected" else None,
+                "installer": self.installer_summary() if self.config.get("role") == "connected" else None,
                 "capabilities": {"import": self.config.get("role") == "disconnected", "publish": self.config.get("role") == "disconnected",
                                  "signed_exports": False, "allow_unsigned_imports": self.config.get("allow_unsigned_imports") is True,
                                  "publisher_installed": PUBLISH_CONF.is_file() and not PUBLISH_CONF.is_symlink()}}
@@ -1676,7 +1828,7 @@ class Engine:
         write_json(self.root / "import-records" / f"{job['id']}.json", record)
 
     def start(self, operation, snapshot_id=None):
-        if operation not in {"preflight", "sync", "sync-export", "export", "verify-export", "import", "publish"}:
+        if operation not in {"preflight", "sync", "sync-export", "export", "verify-export", "import", "publish", "installer"}:
             raise ValueError("Unknown operation")
         if operation in {"import", "publish"}:
             if self.config.get("role") != "disconnected":
@@ -2019,6 +2171,8 @@ class Engine:
                 self.import_bundle(job)
             elif job["operation"] == "publish":
                 self.publish(job)
+            elif job["operation"] == "installer":
+                self.build_installer(job)
             self.update(job, status="succeeded", stage="Completed", finished=now())
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, InterruptedError)):
@@ -2031,6 +2185,148 @@ class Engine:
                     stream.write(json.dumps(error.details, indent=2) + "\n")
             self.update(job, status=state, stage=str(error)[:500], finished=now())
             raise
+
+    @staticmethod
+    def installed_release():
+        """VERSION-RELEASE of the installed main package, e.g. 0.12.0-1.el9."""
+        queried = subprocess.run(["/usr/bin/rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}", INSTALLER_PACKAGES[0]],
+                                 capture_output=True, text=True, check=False, env={**os.environ, "LC_ALL": "C"})
+        release = queried.stdout.strip()
+        if queried.returncode or not re.fullmatch(r"[0-9][0-9A-Za-z.]*-[0-9][0-9A-Za-z._]*", release):
+            raise ValueError("Install this extension from its RPM to build an offline installer")
+        if release.split("-", 1)[0] != VERSION:
+            raise ValueError(f"The installed package ({release}) doesn't match this helper ({VERSION})")
+        return release
+
+    @staticmethod
+    def host_releasever(major):
+        dumped = subprocess.run(["/usr/bin/dnf", "-q", "config-manager", "--dump-variables"], capture_output=True,
+                                text=True, check=False, env={**os.environ, "LC_ALL": "C"})
+        for line in dumped.stdout.splitlines():
+            name, separator, value = line.partition("=")
+            if separator and name.strip() == "releasever" and re.fullmatch(r"[0-9][0-9.]*", value.strip()):
+                return value.strip()
+        return major
+
+    def installer_packages(self, release, folder, job):
+        """Copy this version's RPMs into folder: from the transfer folder if an administrator put them
+        there, otherwise from the matching GitHub release, checked against its SHA256SUMS."""
+        names = [f"{name}-{release}.noarch.rpm" for name in INSTALLER_PACKAGES]
+        transfer = self.export_directory()
+        local = [transfer / name for name in names]
+        if all(path.is_file() and not path.is_symlink() for path in local):
+            self.update(job, stage=f"Using the packages in {transfer}")
+            for path in local:
+                shutil.copyfile(path, folder / path.name)
+            source = f"the transfer folder {transfer}"
+        else:
+            base = f"{RELEASE_DOWNLOADS}/v{VERSION}"
+            self.update(job, stage=f"Downloading this version's packages from GitHub release v{VERSION}")
+            try:
+                fetch_https(f"{base}/SHA256SUMS", folder / "release-SHA256SUMS", 256 * 1024)
+                sums = parse_sha256sums((folder / "release-SHA256SUMS").read_text())
+                (folder / "release-SHA256SUMS").unlink()
+                for name in names:
+                    if name not in sums:
+                        raise ValueError(f"GitHub release v{VERSION} has no {name}")
+                    if fetch_https(f"{base}/{name}", folder / name, 64 * 1024 * 1024) != sums[name]:
+                        raise ValueError(f"{name} doesn't match the checksum published with release v{VERSION}")
+            except OSError as error:
+                raise ValueError(f"Couldn't download this version's packages from GitHub ({error}). Copy {names[0]} and "
+                                 f"{names[1]} into {transfer}, then build again.") from error
+            source = f"GitHub release v{VERSION}"
+        for name in names:
+            header = subprocess.run(["/usr/bin/rpm", "-qp", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}.rpm",
+                                     str(folder / name)], capture_output=True, text=True, check=False,
+                                    env={**os.environ, "LC_ALL": "C"})
+            if header.returncode or header.stdout.strip() != name:
+                raise ValueError(f"{name} isn't the package its name says")
+        return [folder / name for name in names], source
+
+    def build_installer(self, job):
+        """Bundle this extension's RPMs and every dependency a fresh host of the same RHEL release and
+        architecture needs, so a disconnected host can install with no network access."""
+        osinfo = host_os()
+        major, arch = osinfo["major"], osinfo["arch"]
+        work = self.root / "installers" / job["id"]
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            plugin, deps, root = work / "plugin", work / "deps", work / "root"
+            for path in (plugin, deps, root):
+                path.mkdir(parents=True, mode=0o700)
+            self.update(job, step="fetch", stage="Finding this version's packages")
+            release = self.installed_release()
+            packages, source = self.installer_packages(release, plugin, job)
+            self.update(job, step="deps")
+            # An empty install root makes DNF resolve everything a fresh host needs, using this host's
+            # repositories. Signatures are checked separately below, against this host's keyring.
+            self.run_command(["/usr/bin/dnf", "-y", f"--installroot={root}", f"--releasever={self.host_releasever(major)}",
+                              "--setopt=reposdir=/etc/yum.repos.d", "--setopt=varsdir=/etc/dnf/vars,/etc/yum/vars",
+                              f"--setopt=cachedir={work / 'cache'}", "--setopt=install_weak_deps=False",
+                              "--disableexcludes=all", "--nogpgcheck", "install", "--downloadonly",
+                              f"--downloaddir={deps}", *map(str, packages)],
+                             job, "Downloading every package a fresh host needs")
+            for path in deps.glob("*.rpm"):
+                if path.name in {p.name for p in packages}:
+                    path.unlink()
+            dependencies = sorted(deps.glob("*.rpm"))
+            if not dependencies:
+                raise ValueError("DNF didn't download any dependencies; check the job log")
+            self.update(job, step="verify", stage=f"Checking signatures on {len(dependencies)} dependency packages")
+            check_rpm_signatures([str(path) for path in dependencies])
+            self.update(job, step="repo")
+            if not Path(CREATEREPO).is_file():
+                raise ValueError("Install createrepo_c to build an offline installer")
+            self.run_command([CREATEREPO, "--quiet", str(deps)], job, "Indexing the dependency repository")
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(work / "cache", ignore_errors=True)
+            fill = {"@MAJOR@": major, "@ARCH@": arch, "@MAIN@": packages[0].name, "@PUBLISHER@": packages[1].name,
+                    "@RELEASE@": release, "@SOURCE@": source, "@COUNT@": str(len(dependencies)), "@BUILT@": now()[:10]}
+            for name, template in (("install.sh", INSTALLER_SCRIPT), ("README.txt", INSTALLER_README)):
+                text = template
+                for key, value in fill.items():
+                    text = text.replace(key, value)
+                (work / name).write_text(text)
+            members = sorted(path.relative_to(work).as_posix() for path in work.rglob("*") if path.is_file())
+            sums = {name: digest(work / name) for name in members}
+            (work / "SHA256SUMS").write_text("".join(f"{sums[name]}  {name}\n" for name in members))
+            sums["SHA256SUMS"] = digest(work / "SHA256SUMS")
+            members.append("SHA256SUMS")
+            size = sum((work / name).stat().st_size for name in members)
+            destination = self.export_directory()
+            reserve = self.floor if destination.stat().st_dev == self.root.stat().st_dev else 0
+            if shutil.disk_usage(destination).free < size * 1.05 + reserve:
+                raise ValueError(f"Not enough free space in {destination} for the installer ({size // 1024 ** 2} MiB)")
+            top = f"disconnected-content-installer-{release}-{arch}"
+            dest = destination / f"{top}.tar.gz"
+            self.update(job, step="archive", stage=f"Writing and verifying {dest.name}")
+            checksum = write_installer_archive(work, members, sums, dest, top)
+            record = {"job_id": job["id"], "created": now(), "path": str(dest), "checksum_path": str(dest) + ".sha256",
+                      "sha256": checksum, "bytes": dest.stat().st_size, "release": release, "source": source,
+                      "target": {"major": major, "arch": arch}, "dependencies": len(dependencies),
+                      "fingerprint": self.fingerprint(dest)}
+            write_json(self.root / "installer-records" / f"{job['id']}.json", record)
+            self.update(job, result={key: record[key] for key in ("path", "checksum_path", "sha256", "bytes", "release",
+                                                                   "source", "target", "dependencies")})
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def installer_summary(self):
+        """The newest offline installer and whether its file is still where it was written."""
+        records = sorted((self.root / "installer-records").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not records:
+            return None
+        record = read_json(records[0])
+        path = Path(record["path"])
+        if not path.is_file() or path.is_symlink():
+            state, reason = "missing", "The installer file is no longer where it was written"
+        elif self.fingerprint(path) != record["fingerprint"]:
+            state, reason = "changed", "The installer file changed after it was written; build it again"
+        else:
+            state, reason = "available", "Ready to copy to the disconnected host"
+        return {**{key: record[key] for key in ("job_id", "created", "path", "checksum_path", "sha256", "bytes",
+                                                 "release", "source", "target", "dependencies")},
+                "state": state, "reason": reason}
 
     def logs(self, jid):
         self.job_path(jid)

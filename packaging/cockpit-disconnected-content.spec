@@ -1,5 +1,5 @@
 Name: cockpit-disconnected-content
-Version: 0.11.0
+Version: 0.12.0
 Release: 1%{?dist}
 Summary: Disconnected RPM content workflows in the RHEL web console
 License: MIT
@@ -18,6 +18,8 @@ BuildRequires: systemd-rpm-macros
 Requires: python3 >= 3.9
 %endif
 Requires: dnf-plugins-core
+# Indexes the dependency repository inside offline installers.
+Requires: createrepo_c
 Requires: rpm
 Requires: gnupg2
 Requires: zstd
@@ -76,6 +78,10 @@ sed -i '1s|^#!/usr/bin/python3$|#!/usr/bin/python3.12|' %{buildroot}%{_libexecdi
 %dir %attr(0700,root,root) /var/www/disconnected-content/.staging
 
 %changelog
+* Thu Nov 12 2026 Project contributors - 0.12.0-1
+- Choose the host role in a first-run setup step, and allow or turn off unsigned imports from Settings
+- Build packages for RHEL 8.10, RHEL 9, and RHEL 10
+- Build an offline installer on the connected host that installs a disconnected host with no network access
 * Wed Oct 21 2026 Project contributors - 0.11.0-1
 - Streamline both workflows: combined sync and bundle job, inline key approval during import, guided publication, and a one-file Ansible kit
 * Wed Oct 14 2026 Project contributors - 0.10.0-1

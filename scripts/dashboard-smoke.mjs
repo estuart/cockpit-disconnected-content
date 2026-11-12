@@ -22,7 +22,8 @@ const bundleInfo = { bundle_name: 'transfer.tar', bytes: 23, snapshot_id: 'a'.re
   repositories: { 'example-repo': { packages: 146, package_bytes: 90000000 } }, signing_keys: {} };
 const connectedTitles = { select: 'Choose repositories to mirror', sync: 'Ready to sync', export: 'Build a transfer bundle',
   ready: '✓ Bundle ready to transfer', historical: 'Check the existing bundle', missing: 'Build a transfer bundle',
-  changed: 'Ready to sync', failed: 'Sync failed', running: 'Syncing…', 'preflight-failed': 'Size check failed' };
+  changed: 'Ready to sync', failed: 'Sync failed', running: 'Syncing…', 'preflight-failed': 'Size check failed',
+  'installer-ready': '✓ Bundle ready to transfer', 'installer-running': 'Building offline installer…', 'installer-failed': '✓ Bundle ready to transfer' };
 const disconnectedTitles = { source: "Transfer folder isn't available", waiting: 'Waiting for a transfer bundle',
   incoming: 'New bundle ready to import', policy: 'Imports are turned off', checksum: 'A bundle needs attention',
   publisher: 'Install the web publisher', url: 'Set the address clients will use',
@@ -156,6 +157,25 @@ try {
     } else {
       await expect(hero).toHaveText(connectedTitles[name]);
       await expect(page.getByRole('list', { name: 'Connected workflow', exact: true })).toBeVisible();
+      const installerCard = page.locator('.pf-v6-c-card').filter({ hasText: 'Offline installer for the disconnected host' });
+      if (name === 'export') {
+        // No installer yet: one button builds it.
+        await installerCard.getByRole('button', { name: 'Build offline installer', exact: true }).click();
+        await expect.poll(async () => (await calls(page)).some(call => call[0] === 'start' && call[1] === 'installer')).toBe(true);
+      }
+      if (name === 'installer-ready') {
+        await expect(installerCard.getByLabel('Installer files', { exact: true })).toContainText('.tar.gz.sha256');
+        await expect(installerCard).toContainText('181 dependency packages');
+        await expect(installerCard.getByRole('button', { name: 'Build installer again', exact: true })).toBeEnabled();
+      }
+      if (name === 'installer-running') {
+        await expect(page.getByRole('list', { name: 'Job progress' })).toContainText('Download dependencies');
+        await expect(installerCard.getByRole('button', { name: 'Building…' })).toBeDisabled();
+      }
+      if (name === 'installer-failed') {
+        await expect(installerCard.getByText('Installer build failed')).toBeVisible();
+        await expect(installerCard).toContainText("Couldn't download this version's packages from GitHub");
+      }
       if (name === 'ready') {
         await expect(page.getByLabel('Transfer files', { exact: true })).toContainText('.tar.sha256');
         await page.getByRole('button', { name: 'Sync & build new bundle', exact: true }).click();
@@ -241,7 +261,7 @@ try {
   await expect(page.locator('.pf-v6-c-alert__title')).toContainText('Set up as a connected host');
   expect(errors).toEqual([]);
   await page.close();
-  console.log('Ten connected, two first-run, and twenty-one disconnected workflow states, setup, scoped actions, auto-saved selection, downloads, and responsive layouts passed');
+  console.log('Thirteen connected, two first-run, and twenty-one disconnected workflow states, setup, the offline installer, scoped actions, auto-saved selection, downloads, and responsive layouts passed');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));
