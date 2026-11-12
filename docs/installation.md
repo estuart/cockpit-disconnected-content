@@ -17,12 +17,29 @@ There is no role-selecting install script in this version. DNF installs packages
 `/etc/disconnected-content/config.json` selects the mode. Backend commands enforce
 that role; hiding UI tabs is not the access-control mechanism.
 
-## Obtain or build artifacts
+## Download the packages
 
-Prebuilt GitHub releases are not currently published. Build with
-[the development guide](development.md) or obtain RPMs from an approved build
-process. The examples below use version 0.11.0, release 1 for RHEL 10. Adjust the
-filenames to the exact artifacts you built. The two packages must match.
+Each [GitHub release](https://github.com/estuart/cockpit-disconnected-content/releases)
+includes four files: the main RPM, the publisher RPM, the source archive, and a
+`SHA256SUMS` file. The packages are `noarch` and built for RHEL 10 (`.el10`). Release
+RPMs are not GPG-signed yet, so check downloads against `SHA256SUMS`:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+A connected host can install the latest release directly:
+
+```sh
+sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.noarch.rpm
+```
+
+For a disconnected host, download the RPMs and `SHA256SUMS` on a connected machine.
+Check them there, then carry them across with your approved transfer process.
+
+To build the packages yourself, follow [the development guide](development.md). The
+examples below use version 0.11.0, release 1 for RHEL 10. Adjust the filenames to
+the release you downloaded. The two packages must match.
 
 Install the main package explicitly. Avoid a wildcard such as
 `cockpit-disconnected-content-*.rpm`: it also matches the publisher and can install

@@ -70,8 +70,31 @@ content, screenshots of real inventories, local logs, and deployment notes out
 of Git. `.local/` is ignored for machine-specific working notes. Use generic
 examples in issues and pull requests. Review staged content before every commit.
 
-No open-source license grant has been selected yet. Select a license and review
-third-party notices before a public release. Generated frontend bundles preserve
+The project is MIT licensed (see `LICENSE`). Generated frontend bundles preserve
 dependency license notices.
+
+## Publish a release
+
+Releases are built by `.github/workflows/release.yml`, not on a workstation.
+
+1. Set the new version in all five places: `package.json`, `Makefile`,
+   `backend/disconnected_content.py`, `scripts/release.py`, and the spec's
+   `Version`. Add a `%changelog` entry to the spec. The first entry becomes the
+   release notes.
+2. Merge the change to `main`.
+3. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag v0.12.0 origin/main
+   git push origin v0.12.0
+   ```
+
+The workflow fails if the tag and the five version strings disagree. It builds the
+RPMs on CentOS Stream 10 and installs them in a clean container: the main package
+first (checking that it doesn't pull in Apache), then the publisher. It runs
+`disconnected-content status`, then publishes the release with both RPMs,
+unversioned copies for the `releases/latest/download/` URL, the source archive,
+and `SHA256SUMS`. Pull requests that change packaging run the same build and
+install test without publishing.
 
 See [architecture](architecture.md) and [prototype limitations](limitations.md).

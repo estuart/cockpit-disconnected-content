@@ -1,0 +1,125 @@
+name: Release
+# Pushing a tag like v0.11.0 builds the RPMs on CentOS Stream 10, test-installs them in a
+# clean container, and publishes a GitHub release. Pull requests that touch packaging run
+# the same build and install test without publishing.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - Makefile
+      - scripts/release.py
+      - package.json
+      - package-lock.json
+permissions:
+  contents: read
+jobs:
+  rpm:
+    runs-on: ubuntu-24.04
+    container: quay.io/centos/centos:stream10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Install build tools
+        run: dnf -y install git nodejs npm rpm-build make systemd-rpm-macros python3 tar gzip
+      - uses: actions/checkout@v4
+      - name: Check that every version string agrees
+        id: version
+        run: |
+          spec=$(sed -n 's/^Version: *//p' packaging/cockpit-disconnected-content.spec)
+          make=$(sed -n 's/^VERSION := *//p' Makefile)
+          backend=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' backend/disconnected_content.py)
+          npm=$(node -p "require('./package.json').version")
+          script=$(sed -n 's/^version = "\(.*\)"$/\1/p' scripts/release.py)
+          echo "spec=$spec Makefile=$make backend=$backend package.json=$npm release.py=$script"
+          for v in "$make" "$backend" "$npm" "$script"; do
+            if [ "$v" != "$spec" ]; then echo "::error::Version strings disagree; update all five together"; exit 1; fi
+          done
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$spec" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $spec"; exit 1
+          fi
+          echo "version=$spec" >> "$GITHUB_OUTPUT"
+      - run: npm ci --no-audit --no-fund
+      - run: make rpm
+      - name: Collect release files
+        env:
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir out
+          cp build/rpmbuild/RPMS/noarch/*.rpm "build/cockpit-disconnected-content-$V.tar.gz" out/
+          # Unversioned copies give a stable releases/latest/download/... URL for dnf.
+          cp out/cockpit-disconnected-content-$V-*.noarch.rpm out/cockpit-disconnected-content.noarch.rpm
+          cp out/cockpit-disconnected-content-publisher-$V-*.noarch.rpm out/cockpit-disconnected-content-publisher.noarch.rpm
+          cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms
+          path: out/
+          if-no-files-found: error
+
+  install-test:
+    needs: rpm
+    runs-on: ubuntu-24.04
+    container: quay.io/centos/centos:stream10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpms
+      - name: Install the main package alone
+        run: |
+          sha256sum -c SHA256SUMS
+          dnf -y install ./cockpit-disconnected-content.noarch.rpm
+          if rpm -q httpd; then echo "::error::The main package pulled in httpd"; exit 1; fi
+      - name: Add the publisher
+        run: dnf -y install ./cockpit-disconnected-content-publisher.noarch.rpm
+      - name: Run the helper
+        run: |
+          test "$(stat -c '%U:%G %a' /etc/disconnected-content/config.json)" = "root:root 644"
+          /usr/libexec/disconnected-content status | python3 -c '
+          import json, sys
+          status = json.load(sys.stdin)
+          print("role:", status["role"], "version:", status["version"])
+          assert status["version"] == "${{ needs.rpm.outputs.version }}"'
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [rpm, install-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpms
+          path: out
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.rpm.outputs.version }}
+        run: |
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          {
+            echo "## Changes"
+            echo
+            awk '/^%changelog/ {on=1; next} on && /^\* / {n++} on && n==1 && /^- / {print}' packaging/cockpit-disconnected-content.spec
+            echo
+            echo "## Install"
+            echo
+            echo "Connected host (RHEL 10):"
+            echo
+            echo '```sh'
+            echo "sudo dnf install $base/$(cd out && ls cockpit-disconnected-content-$V-*.noarch.rpm)"
+            echo '```'
+            echo
+            echo "For a disconnected host, download the RPMs and \`SHA256SUMS\` on a connected machine,"
+            echo "check them with \`sha256sum -c SHA256SUMS\`, and carry them across. Add the publisher"
+            echo "package only on hosts that will serve repositories to clients. See the"
+            echo "[installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/installation.md)."
+            echo
+            echo "These RPMs are not GPG-signed yet. Verify them against \`SHA256SUMS\`."
+          } > notes.md
+          cat notes.md
+          gh release create "$GITHUB_REF_NAME" out/* --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
