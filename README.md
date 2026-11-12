@@ -16,6 +16,7 @@ to see the whole workflow without installing anything. It runs the plugin's real
 interface in your browser against a simulated backend, with a guided tour from
 the connected host, across the air gap, to published repositories.
 
+[Download](https://github.com/estuart/cockpit-disconnected-content/releases/latest) ·
 [Install and select a role](docs/installation.md) ·
 [Operator guide](docs/operator-guide.md) ·
 [Client automation](docs/automation-options.md) ·
