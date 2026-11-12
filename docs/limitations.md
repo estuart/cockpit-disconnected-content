@@ -1,7 +1,8 @@
 # Prototype boundaries
 
-- Initial deployment target: RHEL 10 x86_64. Other RHEL/Cockpit combinations require
-  their own validation before being advertised as supported.
+- Packages are built for RHEL 8.10, 9, and 10. The complete workflow has been
+  validated on RHEL 10 x86_64; RHEL 8 and 9 are installed and started in containers
+  for every release, and have the differences listed in the installation guide.
 - Connected sync/export and disconnected import roles are implemented. The
   application does not provision VMs or change network isolation policies.
 - HTTP publication requires the optional publisher package and a separately

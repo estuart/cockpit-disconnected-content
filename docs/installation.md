@@ -1,8 +1,10 @@
 # Installation and role configuration
 
-The current tested target is RHEL 10.2 x86_64. Other RHEL versions and architectures
-have not been established by the current validation. Use matching RHEL major
-version and architecture for a connected/disconnected content pair and its clients.
+Packages are built for RHEL 8.10, RHEL 9 (9.3 or later), and RHEL 10. The complete
+workflow has been validated on RHEL 10.2 x86_64; RHEL 8 and 9 packages are installed
+and started in clean containers on every release. See
+[Differences between RHEL releases](#differences-between-rhel-releases). Use the same
+RHEL major version and architecture for a connected/disconnected pair and its clients.
 
 ## Packages and modes
 
@@ -23,26 +25,28 @@ access-control mechanism.
 ## Download the packages
 
 Each [GitHub release](https://github.com/estuart/cockpit-disconnected-content/releases)
-includes four files: the main RPM, the publisher RPM, the source archive, and a
-`SHA256SUMS` file. The packages are `noarch` and built for RHEL 10 (`.el10`). Release
-RPMs are not GPG-signed yet, so check downloads against `SHA256SUMS`:
+includes the main and publisher RPMs for each RHEL release (`.el8`, `.el9`, and
+`.el10`), the source archive, and a `SHA256SUMS` file. Install the packages built for
+the host's release. Release RPMs are not GPG-signed yet, so check downloads against
+`SHA256SUMS`:
 
 ```sh
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-A connected host can install the latest release directly:
+A connected host can install the latest release directly. `rpm -E %rhel` prints
+the host's major version, so the same command works on RHEL 8, 9, and 10:
 
 ```sh
-sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.noarch.rpm
+sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.el$(rpm -E %rhel).noarch.rpm
 ```
 
 For a disconnected host, download the RPMs and `SHA256SUMS` on a connected machine.
 Check them there, then carry them across with your approved transfer process.
 
 To build the packages yourself, follow [the development guide](development.md). The
-examples below use version 0.11.0, release 1 for RHEL 10. Adjust the filenames to
-the release you downloaded. The two packages must match.
+examples below use version 0.11.0, release 1 for RHEL 10. On RHEL 8 or 9, use the
+`.el8` or `.el9` files instead. The two packages must match.
 
 Install the main package explicitly. Avoid a wildcard such as
 `cockpit-disconnected-content-*.rpm`: it also matches the publisher and can install
@@ -130,6 +134,30 @@ is included yet.
 Runtime hosts do not need Node.js or npm. Ansible is not required on the publisher
 for generating downloads; it is required on the separate control node when the
 operator runs those downloads.
+
+## Differences between RHEL releases
+
+| | RHEL 8.10 | RHEL 9 | RHEL 10 |
+| --- | --- | --- | --- |
+| Packages | `.el8` | `.el9` | `.el10` |
+| Helper runs on | `python3.12` from AppStream (installed as a dependency) | `python3` 3.9 | `python3` 3.12 |
+| Minimum Cockpit | 300, which needs RHEL 8.10 | 300, which needs RHEL 9.3 or later | Included |
+| Ansible Core on the control node for clients | 2.16 exactly | 2.16 or later | 2.16 or later |
+
+- On RHEL 8, `python3` is Python 3.6, which the helper doesn't support, so the
+  `.el8` package depends on `python3.12`. Include it in the offline dependencies
+  for a disconnected RHEL 8 host.
+- Ansible Core 2.17 and later can't manage RHEL 8 clients, whose system Python is
+  3.6. Playbooks generated for a RHEL 8 publication stop with that explanation
+  before contacting clients when run with a newer Ansible Core.
+- Each release's RPM verifies signatures with its own OpenPGP implementation, so a
+  repository key can be accepted on one release and rejected on another. RPM on
+  RHEL 8 can't use EdDSA keys. RHEL 9 and 10 reject SHA-1 signatures under the
+  default crypto policy; RHEL 9 may report those packages as having a bad
+  signature rather than an untrusted one.
+- systemd on RHEL 8 doesn't know two hardening settings in the job unit
+  (`Type=exec` and `RestrictSUIDSGID`), so it ignores them and logs a warning. Jobs
+  still run as a root service with the other protections.
 
 ## Storage and publication
 

@@ -67,7 +67,8 @@ export function Clients({ ctx }: { ctx: Ctx }) {
 ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org --check
 ansible-playbook -i inventory.ini configure-repos.yml --limit client.example.org
 ansible-playbook -i inventory.ini security-updates.yml --limit client.example.org --check`}</pre>
-            <p className="dc-muted">Needs ansible-core 2.16 or newer on your control node. Playbooks stop on the first failure and never reboot hosts.</p>
+            <p className="dc-muted">{publication.os.major === '8' ? 'RHEL 8 clients need ansible-core 2.16 exactly on your control node; later versions can’t manage their Python 3.6.' :
+              'Needs ansible-core 2.16 or newer on your control node.'} Playbooks stop on the first failure and never reboot hosts.</p>
             <details className="dc-details"><summary>Download files individually or preview them</summary>
               <div className="dc-actions">{Object.keys(automation.files).map(name =>
                 <Button key={name} variant="secondary" size="sm" onClick={() => downloadFile(automation.files[name], name)}>{name}</Button>)}</div>

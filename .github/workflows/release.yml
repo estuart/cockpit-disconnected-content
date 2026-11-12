@@ -1,7 +1,8 @@
 name: Release
-# Pushing a tag like v0.11.0 builds the RPMs on CentOS Stream 10, test-installs them in a
-# clean container, and publishes a GitHub release. Pull requests that touch packaging run
-# the same build and install test without publishing.
+# Pushing a tag like v0.12.0 builds RPMs for RHEL 8, 9, and 10 from one source archive,
+# test-installs each in a clean container of the same release, and publishes one GitHub
+# release. Pull requests that touch packaging run the same builds and install tests
+# without publishing.
 on:
   push:
     tags: ['v*']
@@ -16,14 +17,14 @@ on:
 permissions:
   contents: read
 jobs:
-  rpm:
+  source:
     runs-on: ubuntu-24.04
     container: quay.io/centos/centos:stream10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Install build tools
-        run: dnf -y install git nodejs npm rpm-build make systemd-rpm-macros python3 tar gzip
+        run: dnf -y install git nodejs npm make python3 tar gzip
       - uses: actions/checkout@v4
       - name: Check that every version string agrees
         id: version
@@ -42,50 +43,78 @@ jobs:
           fi
           echo "version=$spec" >> "$GITHUB_OUTPUT"
       - run: npm ci --no-audit --no-fund
-      - run: make rpm
-      - name: Collect release files
-        env:
-          V: ${{ steps.version.outputs.version }}
-        run: |
-          mkdir out
-          cp build/rpmbuild/RPMS/noarch/*.rpm "build/cockpit-disconnected-content-$V.tar.gz" out/
-          # Unversioned copies give a stable releases/latest/download/... URL for dnf.
-          cp out/cockpit-disconnected-content-$V-*.noarch.rpm out/cockpit-disconnected-content.noarch.rpm
-          cp out/cockpit-disconnected-content-publisher-$V-*.noarch.rpm out/cockpit-disconnected-content-publisher.noarch.rpm
-          cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # Builds the frontend once; the source archive carries the compiled assets, so the
+      # per-release RPM builds below don't need Node.
+      - run: make dist
       - uses: actions/upload-artifact@v4
         with:
-          name: rpms
+          name: source
+          path: build/cockpit-disconnected-content-${{ steps.version.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+  rpm:
+    needs: source
+    strategy:
+      matrix:
+        include:
+          - { el: 8, image: 'quay.io/almalinuxorg/almalinux:8', macros: systemd }
+          - { el: 9, image: 'quay.io/almalinuxorg/almalinux:9', macros: systemd-rpm-macros }
+          - { el: 10, image: 'quay.io/centos/centos:stream10', macros: systemd-rpm-macros }
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install build tools
+        run: dnf -y install rpm-build make ${{ matrix.macros }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: source
+      - name: Build the RPMs
+        env:
+          V: ${{ needs.source.outputs.version }}
+        run: |
+          rpmbuild -tb "cockpit-disconnected-content-$V.tar.gz" --define "_topdir $PWD/rpmbuild"
+          mkdir out && cp rpmbuild/RPMS/noarch/*.el${{ matrix.el }}.noarch.rpm out/ && ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms-el${{ matrix.el }}
           path: out/
           if-no-files-found: error
 
   install-test:
-    needs: rpm
+    needs: [source, rpm]
+    strategy:
+      matrix:
+        include:
+          - { el: 8, image: 'quay.io/almalinuxorg/almalinux:8', python: /usr/bin/python3.12 }
+          - { el: 9, image: 'quay.io/almalinuxorg/almalinux:9', python: /usr/bin/python3 }
+          - { el: 10, image: 'quay.io/centos/centos:stream10', python: /usr/bin/python3 }
     runs-on: ubuntu-24.04
-    container: quay.io/centos/centos:stream10
+    container: ${{ matrix.image }}
+    env:
+      V: ${{ needs.source.outputs.version }}
+      HELPER: /usr/libexec/disconnected-content
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: rpms
+          name: rpms-el${{ matrix.el }}
       - name: Install the main package alone
         run: |
-          sha256sum -c SHA256SUMS
-          dnf -y install ./cockpit-disconnected-content.noarch.rpm
+          dnf -y install ./cockpit-disconnected-content-$V-*.el${{ matrix.el }}.noarch.rpm
           if rpm -q httpd; then echo "::error::The main package pulled in httpd"; exit 1; fi
       - name: Add the publisher
-        run: dnf -y install ./cockpit-disconnected-content-publisher.noarch.rpm
-      - name: Run the helper
+        run: dnf -y install ./cockpit-disconnected-content-publisher-$V-*.el${{ matrix.el }}.noarch.rpm
+      - name: Check the helper and first-run setup
         run: |
+          test "$(head -1 $HELPER)" = "#!${{ matrix.python }}"
           test "$(stat -c '%U:%G %a' /etc/disconnected-content/config.json)" = "root:root 644"
-          /usr/libexec/disconnected-content status | python3 -c '
-          import json, sys
-          status = json.load(sys.stdin)
-          print("role:", status["role"], "version:", status["version"])
-          assert status["version"] == "${{ needs.rpm.outputs.version }}"'
+          check() { $HELPER status | ${{ matrix.python }} -c "import json, sys; s = json.load(sys.stdin); print(s['role'], s['version']); assert (s['role'], s['version']) == ($1, '$V')"; }
+          check None
+          $HELPER setup connected
+          check "'connected'"
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [rpm, install-test]
+    needs: [source, rpm, install-test]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -93,12 +122,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: rpms
+          pattern: rpms-*
+          merge-multiple: true
           path: out
+      - uses: actions/download-artifact@v4
+        with:
+          name: source
+          path: out
+      - name: Add stable names and checksums
+        env:
+          V: ${{ needs.source.outputs.version }}
+        working-directory: out
+        run: |
+          for n in 8 9 10; do
+            # Unversioned copies give a stable releases/latest/download/... URL per release.
+            cp cockpit-disconnected-content-$V-*.el$n.noarch.rpm cockpit-disconnected-content.el$n.noarch.rpm
+            cp cockpit-disconnected-content-publisher-$V-*.el$n.noarch.rpm cockpit-disconnected-content-publisher.el$n.noarch.rpm
+          done
+          # Names from 0.11.0, when only RHEL 10 was built; kept so shared links keep working.
+          cp cockpit-disconnected-content.el10.noarch.rpm cockpit-disconnected-content.noarch.rpm
+          cp cockpit-disconnected-content-publisher.el10.noarch.rpm cockpit-disconnected-content-publisher.noarch.rpm
+          sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          V: ${{ needs.rpm.outputs.version }}
         run: |
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
           {
@@ -108,15 +155,17 @@ jobs:
             echo
             echo "## Install"
             echo
-            echo "Connected host (RHEL 10):"
+            echo "Builds for RHEL 8.10, RHEL 9, and RHEL 10. On a connected host, this installs the one that matches:"
             echo
             echo '```sh'
-            echo "sudo dnf install $base/$(cd out && ls cockpit-disconnected-content-$V-*.noarch.rpm)"
+            echo "sudo dnf install $base/cockpit-disconnected-content.el\$(rpm -E %rhel).noarch.rpm"
             echo '```'
             echo
-            echo "For a disconnected host, download the RPMs and \`SHA256SUMS\` on a connected machine,"
-            echo "check them with \`sha256sum -c SHA256SUMS\`, and carry them across. Add the publisher"
-            echo "package only on hosts that will serve repositories to clients. See the"
+            echo "Then run \`sudo systemctl enable --now cockpit.socket\`, open the web console, and choose the host's role."
+            echo
+            echo "For a disconnected host, download the RPMs for its RHEL release and \`SHA256SUMS\` on a connected"
+            echo "machine, check them with \`sha256sum -c SHA256SUMS --ignore-missing\`, and carry them across. Add the"
+            echo "publisher package only on hosts that will serve repositories to clients. See the"
             echo "[installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/installation.md)."
             echo
             echo "These RPMs are not GPG-signed yet. Verify them against \`SHA256SUMS\`."

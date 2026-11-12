@@ -1,14 +1,15 @@
 # Development and building RPMs
 
-The tested build path uses Node.js 22 and Python 3.12, with RPM builds on RHEL 10.
+The tested build path uses Node.js 22 and Python 3.12. Release RPMs are built for each
+RHEL release from the same source archive.
 Runtime hosts use the packaged frontend and do not need Node.js or npm.
 
 ## Build and test
 
 The frontend is compiled on a build machine. Runtime hosts do not need npm.
 
-On the RHEL build host, install `rpm-build`, `make`, and
-`systemd-rpm-macros` before `make rpm`. Node.js is needed where the frontend is
+On the RHEL build host, install `rpm-build`, `make`, and `systemd-rpm-macros`
+(`systemd` on RHEL 8) before `make rpm`. Node.js is needed where the frontend is
 built; the portable source archive includes its compiled assets.
 
 ```sh
@@ -90,11 +91,18 @@ Releases are built by `.github/workflows/release.yml`, not on a workstation.
    ```
 
 The workflow fails if the tag and the five version strings disagree. It builds the
-RPMs on CentOS Stream 10 and installs them in a clean container: the main package
-first (checking that it doesn't pull in Apache), then the publisher. It runs
-`disconnected-content status`, then publishes the release with both RPMs,
-unversioned copies for the `releases/latest/download/` URL, the source archive,
-and `SHA256SUMS`. Pull requests that change packaging run the same build and
-install test without publishing.
+frontend and source archive once, then builds the RPMs on AlmaLinux 8, AlmaLinux 9,
+and CentOS Stream 10. Each release's packages are installed in a clean container of
+that release:
+- the main package first, checking that it doesn't pull in Apache, then the
+  publisher;
+- the helper must use the expected interpreter (`python3.12` on RHEL 8);
+- `status` must report no role, and `setup connected` must work.
+
+The release then gets every RPM, unversioned copies per release
+(`cockpit-disconnected-content.el9.noarch.rpm` and so on) for the
+`releases/latest/download/` URL, the 0.11.0 names as aliases for RHEL 10, the
+source archive, and `SHA256SUMS`. Pull requests that change packaging run the same
+builds and install tests without publishing.
 
 See [architecture](architecture.md) and [prototype limitations](limitations.md).
