@@ -57,9 +57,11 @@ publisher, then adding a setup command with an explicit role choice. See the
 
 ## Get started
 
-1. **Build the RPMs** using the [development guide](docs/development.md), or obtain
-   matching artifacts from your approved build process. Prebuilt GitHub releases
-   are not currently published.
+1. **Download the RPMs** from the
+   [latest release](https://github.com/estuart/cockpit-disconnected-content/releases/latest),
+   or build them with the [development guide](docs/development.md). A connected
+   host can install directly with
+   `sudo dnf install https://github.com/estuart/cockpit-disconnected-content/releases/latest/download/cockpit-disconnected-content.noarch.rpm`.
 2. **Install the main RPM on both hosts**, and the optional publisher only where
    repositories will be served. Provision all runtime dependencies before
    isolating the disconnected host, or use an approved offline bootstrap repository.
