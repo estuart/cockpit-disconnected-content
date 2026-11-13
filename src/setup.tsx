@@ -45,7 +45,7 @@ export function FirstRun({ state, busy, onSetup }: { state: State; busy: boolean
     <p className="dc-muted dc-setup-note">Content is stored in <code>{state.storage.path}</code>. To use a different location, change{' '}
       <code>state_dir</code> in <code>/etc/disconnected-content/config.json</code> before you set up.</p>
     <div className="dc-actions">
-      <Button isDisabled={!role || busy} isLoading={busy}
+      <Button isDisabled={!role || busy} isLoading={busy || undefined}
         onClick={() => role && onSetup(role === 'disconnected' ? { role, allow_unsigned_imports: unsigned } : { role })}>
         {role ? `Set up as a ${role} host` : 'Choose a role to continue'}</Button>
     </div>

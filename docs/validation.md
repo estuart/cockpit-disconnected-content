@@ -519,3 +519,69 @@ README, and `install.sh`.
   `cockpit.socket` there, and the job ran without its service unit. The job
   service, a GitHub download of a published release, and real RHEL hosts with
   subscription-managed repositories are left for lab validation.
+
+## Lab validation for 0.12.0
+
+This lab run used RPMs built from the branch on the toughbook (RHEL 10.2), the
+disconnected lab VM (RHEL 10.2), and a RHEL 8.10 VM. Each had SELinux enforcing,
+and Cockpit sessions were reached through SSH tunnels.
+
+**Connected host, RHEL 10.2.** It was registered, with ten repositories enabled,
+including EPEL, RPM Fusion, Docker, HashiCorp, and Tailscale.
+- **Upgrade from 0.11.0.** The edited configuration (custom `state_dir`) was kept,
+  and the new default was written to `config.json.rpmnew`. Status reported 0.12.0,
+  connected and ready, and the job unit passed `systemd-analyze verify`.
+- **First-run setup.** With the role removed, status suggested connected because of
+  16 existing snapshots. In a live Cockpit 356 session, the setup step showed the
+  hint with Connected pre-selected. **Set up as a connected host** switched straight
+  to "✓ Bundle ready to transfer". The configuration kept `state_dir`, gained a
+  timestamped backup, and stayed `root:root 0644`.
+- **Offline installer under its systemd unit.**
+  - The first build failed at the fetch step, as expected: there's no v0.12.0
+    release yet, so GitHub returned 404, and the message named both RPMs and the
+    transfer folder to copy them into.
+  - With the RPMs in that folder, the second build finished in 38 seconds, using
+    the subscription-managed repositories through the empty install root: 182
+    dependencies in an 87 MiB archive.
+  - Despite the third-party repositories, every dependency came from Red Hat and
+    was signed with key `199e2f91fd431d51`.
+
+**Disconnected host, RHEL 10.2.** No default route. It ran 0.11.0 with the publisher
+and was publishing to clients.
+- **Transfer.** The installer reached the host through the workstation, and its
+  checksum matched at every hop.
+- **Offline upgrade.** `install.sh --with-publisher` upgraded both packages and
+  installed only `createrepo_c` and the one library it needs from the installer's
+  repository, with GPG checks on.
+- **After the upgrade.** The edited configuration was kept (with
+  `config.json.rpmnew`), the publication stayed available, `cockpit.socket` and
+  `httpd` stayed active, and the unit verified.
+
+**Upgrade from an unmodified configuration.** Tested in a CentOS Stream 10
+container, installing the published v0.11.0 RPM and then the 0.12.0 build. RPM
+replaced the old default with the role-less one, status suggested connected from
+an existing export record, and `setup connected` restored the role.
+
+**RHEL 8.10 VM.**
+- **Install.** The `.el8` package installed `python3.12`, `createrepo_c`, and
+  `zstd` from AppStream, and no Apache. The helper ran on Python 3.12, and
+  `systemd-analyze verify` passed with no warnings: systemd on RHEL 8.10 accepts
+  the unit's `Type=exec` and `RestrictSUIDSGID`.
+- **Setup in Cockpit 310.** The setup step rendered correctly inside the older
+  Cockpit 310 shell, with no hint, and set the connected role.
+- **Sync and bundle.** On a temporary local repository of three Red Hat packages,
+  the job (size check, `reposync`, RPM 4.14 signature checks, and key collection
+  through `dnf config-manager --dump`) bundled both Red Hat key blocks and verified
+  the export.
+  - The first attempt failed because the test repository was under `/var/tmp`,
+    which the job service can't see (`PrivateTmp`). That is now in the
+    troubleshooting table.
+- **Offline installer.** The build resolved 211 dependencies (122 MiB), including
+  four modular `httpd` packages. All came from Red Hat, signed with `199e2f91fd431d51`,
+  even with EPEL enabled.
+
+**Not covered in the lab:**
+- RHEL 9 on a real host (packages are tested in AlmaLinux 9 containers);
+- a fresh offline install on a real VM with no Cockpit (tested in containers on all
+  three releases);
+- the installer's GitHub download path with a published release.

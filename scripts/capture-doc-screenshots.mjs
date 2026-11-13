@@ -58,6 +58,7 @@ try {
   const setupPage = await pageFor(firstRun);
   await setupPage.page.getByRole('radio', { name: /^Disconnected host/ }).check();
   await expect(setupPage.page.getByRole('button', { name: 'Set up as a disconnected host', exact: true })).toBeEnabled();
+  await setupPage.page.waitForTimeout(500); // Let the button finish its enabled-state transition.
   await setupPage.page.screenshot({ path: `${output}/first-run-setup.png`, fullPage: true });
   expect(setupPage.errors).toEqual([]);
   await setupPage.page.close();

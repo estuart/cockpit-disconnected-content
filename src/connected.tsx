@@ -157,7 +157,7 @@ function OfflineInstaller({ ctx }: { ctx: Ctx }) {
       <p className="dc-muted">Built <Ago value={installer.created} /> · {bytes(installer.bytes)} · {plural(installer.dependencies, 'dependency package')} ·
         for RHEL {installer.target.major} {installer.target.arch}. On the disconnected host, unpack it and run <code>sudo ./install.sh --with-publisher</code>.</p></>}
     <div className="dc-actions dc-installer-actions">
-      <Button variant={ready ? 'secondary' : 'primary'} isDisabled={busy || Boolean(active)} isLoading={running}
+      <Button variant={ready ? 'secondary' : 'primary'} isDisabled={busy || Boolean(active)} isLoading={running || undefined}
         onClick={() => { void ctx.start('installer'); }}>{running ? 'Building…' : installer ? 'Build installer again' : 'Build offline installer'}</Button>
     </div>
     <p className="dc-muted">Gets this version's packages from its GitHub release, or from the transfer folder if you copied them there.

@@ -294,6 +294,7 @@ for prerequisites, commands, and the later AAP integration direction.
 | Offline installer can't download this version's packages | Copy the two RPMs for the installed version into the transfer folder and build again |
 | `install.sh` reports a different RHEL release or architecture | Build the installer on a connected host with the same RHEL major release and architecture as the disconnected host |
 | Sync reports unsigned packages | The repository includes unsigned RPMs; choose a repository whose packages are all signed |
+| Size check can't read a local `file://` repository | Jobs run with a private `/tmp` and `/var/tmp`, so they can't see repositories stored there. Move the repository, for example to `/srv`, and update its `baseurl` |
 | Export folder unavailable | Mount the drive at the saved path or choose another folder in Settings |
 | Transfer archive missing | Mount the media and choose the correct folder in Settings; only the selected folder is scanned |
 | Checksum sidecar missing or mismatched | Transfer the matching `.tar.sha256` with the archive; replace a changed/corrupt transfer from a verified export |

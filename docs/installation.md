@@ -202,9 +202,6 @@ operator runs those downloads.
   RHEL 8 can't use EdDSA keys. RHEL 9 and 10 reject SHA-1 signatures under the
   default crypto policy; RHEL 9 may report those packages as having a bad
   signature rather than an untrusted one.
-- systemd on RHEL 8 doesn't know two hardening settings in the job unit
-  (`Type=exec` and `RestrictSUIDSGID`), so it ignores them and logs a warning. Jobs
-  still run as a root service with the other protections.
 
 ## Storage and publication
 
