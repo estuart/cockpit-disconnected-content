@@ -34,9 +34,10 @@ jobs:
           backend=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' backend/disconnected_content.py)
           npm=$(node -p "require('./package.json').version")
           script=$(sed -n 's/^version = "\(.*\)"$/\1/p' scripts/release.py)
-          echo "spec=$spec Makefile=$make backend=$backend package.json=$npm release.py=$script"
-          for v in "$make" "$backend" "$npm" "$script"; do
-            if [ "$v" != "$spec" ]; then echo "::error::Version strings disagree; update all five together"; exit 1; fi
+          manifest=$(node -p "require('./src/manifest.json').version")
+          echo "spec=$spec Makefile=$make backend=$backend package.json=$npm release.py=$script manifest.json=$manifest"
+          for v in "$make" "$backend" "$npm" "$script" "$manifest"; do
+            if [ "$v" != "$spec" ]; then echo "::error::Version strings disagree; update all six together"; exit 1; fi
           done
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$spec" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match version $spec"; exit 1

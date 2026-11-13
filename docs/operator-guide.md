@@ -66,6 +66,24 @@ verified against approved repository keys, or the host's existing RPM keyring
 when no repository-specific keys are configured. Do not treat a transferred key
 and an accompanying bundle as an independent trust anchor.
 
+### Offline installer for the disconnected host
+
+**Overview → Offline installer for the disconnected host → Build offline
+installer** runs one job with these steps:
+1. Gets this version's RPMs, from the GitHub release or the transfer folder.
+2. Downloads every package a fresh host of the same RHEL release and architecture
+   would need, using this host's repositories.
+3. Checks their signatures against this host's keyring.
+4. Indexes the packages and writes a verified `.tar.gz` and `.sha256` to the
+   transfer folder.
+
+The card then shows both paths. Carry them across with the content bundle. On the
+disconnected host, unpack the archive and run `sudo ./install.sh` (add
+`--with-publisher` to serve clients). See
+[the installation guide](installation.md#offline-installer-recommended).
+
+![Offline installer card with the archive and checksum paths](screenshots/offline-installer.png)
+
 ## Repository signing keys
 
 Exports now include public keys from each mirrored repository's configured
@@ -271,9 +289,12 @@ for prerequisites, commands, and the later AAP integration direction.
 
 | Symptom | Check and next action |
 | --- | --- |
-| Connected tabs on an import host | Check the root-owned configuration's `role`; installing the publisher does not change it |
-| Unsigned prototype imports disabled | Review the prototype manifest policy and the explicit administrator opt-in in the installation guide; RPM signatures remain required |
+| Connected tabs on an import host | The host was set up as connected. Role changes are manual; see the installation guide. Installing the publisher doesn't change the role |
+| Unsigned prototype imports disabled | Use **Allow unsigned bundles…** in Settings after reviewing the prototype manifest policy; RPM signatures remain required |
+| Offline installer can't download this version's packages | Copy the two RPMs for the installed version into the transfer folder and build again |
+| `install.sh` reports a different RHEL release or architecture | Build the installer on a connected host with the same RHEL major release and architecture as the disconnected host |
 | Sync reports unsigned packages | The repository includes unsigned RPMs; choose a repository whose packages are all signed |
+| Size check can't read a local `file://` repository | Jobs run with a private `/tmp` and `/var/tmp`, so they can't see repositories stored there. Move the repository, for example to `/srv`, and update its `baseurl` |
 | Export folder unavailable | Mount the drive at the saved path or choose another folder in Settings |
 | Transfer archive missing | Mount the media and choose the correct folder in Settings; only the selected folder is scanned |
 | Checksum sidecar missing or mismatched | Transfer the matching `.tar.sha256` with the archive; replace a changed/corrupt transfer from a verified export |

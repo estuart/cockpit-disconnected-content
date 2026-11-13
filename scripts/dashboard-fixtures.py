@@ -11,7 +11,8 @@ engine = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(engine)
 
 states = {}
-for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'changed', 'failed', 'running', 'preflight-failed']:
+for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'changed', 'failed', 'running', 'preflight-failed',
+             'installer-ready', 'installer-running', 'installer-failed']:
     with tempfile.TemporaryDirectory() as temporary:
         app = engine.Engine({'role': 'connected', 'state_dir': temporary, 'reserve_gib': 0})
         sid = 'a' * 32
@@ -22,7 +23,7 @@ for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'chan
         snapshots = [] if case in {'select', 'sync'} else [{'id': sid, 'created': '2026-01-01T10:00:00+00:00',
             'status': 'validated', 'os': {'major': '10', 'arch': 'x86_64'}, 'package_bytes': 90000000,
             'repositories': {'example-baseos': {'packages': 146, 'package_bytes': 90000000, 'metadata_types': ['updateinfo']}}}]
-        if case in {'ready', 'historical', 'missing'}:
+        if case in {'ready', 'historical', 'missing'} or case.startswith('installer'):
             archive = app.root / 'exports' / (sid + '.tar')
             archive.write_bytes(b'UI fixture')
             sha = engine.digest(archive)
@@ -38,6 +39,20 @@ for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'chan
             jobs = [{'id': 'c' * 32, 'operation': 'preflight' if case == 'preflight-failed' else 'sync', 'status': 'running' if case == 'running' else 'failed',
                      'profile': app.profile(), 'stage': 'Example download failed' if case == 'failed' else 'Downloading original packages and metadata',
                      'created': '2026-01-02T10:00:00+00:00', 'started': '2026-01-02T10:00:00+00:00', 'updated': '2026-01-02T10:01:00+00:00'}]
+        installer = None
+        if case.startswith('installer'):
+            # An offline installer job: running, failed, or finished with its file still in place.
+            status = {'installer-running': 'running', 'installer-failed': 'failed', 'installer-ready': 'succeeded'}[case]
+            jobs = [{'id': 'd' * 32, 'operation': 'installer', 'status': status, 'profile': app.profile(), 'step': 'deps',
+                     'stage': "Couldn't download this version's packages from GitHub" if status == 'failed' else 'Downloading every package a fresh host needs',
+                     'created': '2026-01-01T11:20:00+00:00', 'started': '2026-01-01T11:20:00+00:00', 'updated': '2026-01-01T11:21:00+00:00'}]
+            if case == 'installer-ready':
+                name = f'disconnected-content-installer-{engine.VERSION}-1.el10-x86_64.tar.gz'
+                installer = {'job_id': 'd' * 32, 'created': '2026-01-01T11:30:00+00:00', 'path': f'/var/lib/disconnected-content/exports/{name}',
+                             'checksum_path': f'/var/lib/disconnected-content/exports/{name}.sha256', 'sha256': 'e' * 64, 'bytes': 94371840,
+                             'release': f'{engine.VERSION}-1.el10', 'source': f'GitHub release v{engine.VERSION}',
+                             'target': {'major': '10', 'arch': 'x86_64'}, 'dependencies': 181, 'state': 'available',
+                             'reason': 'Ready to copy to the disconnected host'}
         connected = app.connected_status(snapshots, jobs)
         states[case] = json.loads(json.dumps({'version': engine.VERSION, 'role': 'connected',
             'os': {'name': 'RHEL 10', 'major': '10', 'arch': 'x86_64'},
@@ -46,6 +61,7 @@ for case in ['select', 'sync', 'export', 'ready', 'historical', 'missing', 'chan
                              {'id': 'example-appstream', 'name': 'RHEL 10 AppStream', 'enabled': False}],
             'profile': app.profile(), 'jobs': jobs, 'snapshots': snapshots, 'incoming': [],
             'import_source': None, 'publication': None, 'connected': connected, 'export_settings': app.export_settings(),
+            'installer': installer,
             'capabilities': {'allow_unsigned_imports': False}}).replace(temporary, '/var/lib/disconnected-content'))
 # First run: no role yet. "setup-upgrade" is a host that already holds connected content.
 for case, hint in [('setup', None), ('setup-upgrade', 'connected')]:

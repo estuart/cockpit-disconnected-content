@@ -36,6 +36,9 @@ export type Disconnected = { phase: 'source' | 'waiting' | 'import_policy' | 'im
   target_snapshot_id: string | null; pending_bundles: number; known_bundles: number; client_application: 'unconfirmed';
   repositories: { id: string; snapshot_id: string; imported_at: string; repository: { packages: number; metadata_types: string[] };
     publication_state: 'current' | 'older' | 'not_published' }[] };
+export type InstallerSummary = { job_id: string; created: string; path: string; checksum_path: string; sha256: string; bytes: number;
+  release: string; source: string; target: { major: string; arch: string }; dependencies: number;
+  state: 'available' | 'missing' | 'changed'; reason: string };
 export type State = { version: string; role: 'connected' | 'disconnected' | null; os: { name: string; major: string; arch: string };
   setup_hint?: 'connected' | 'disconnected' | null;
   storage: { path: string; free: number; total: number; reserve: number };
@@ -47,6 +50,7 @@ export type State = { version: string; role: 'connected' | 'disconnected' | null
     availability: { state: 'not_published' | 'available' | 'unavailable'; reason: string } } | null;
   connected: Connected | null; disconnected: Disconnected | null;
   export_settings?: { path: string; default: boolean; available: boolean; error?: string; free?: number; updated_at?: string } | null;
+  installer?: InstallerSummary | null;
   capabilities: { allow_unsigned_imports: boolean; publisher_installed?: boolean } };
 export type DirectoryListing = { path: string; parent: string | null; truncated: boolean;
   directories: { name: string; path: string }[];
@@ -94,7 +98,7 @@ export function snapshotLabel(snapshot: { id: string; created: string } | null |
   return `${day}, ${new Date(snapshot.created).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
 }
 export const operationNames: Record<string, string> = { preflight: 'Size check', sync: 'Sync', 'sync-export': 'Sync & build bundle',
-  export: 'Build bundle', 'verify-export': 'Verify bundle', import: 'Import', publish: 'Publish' };
+  export: 'Build bundle', 'verify-export': 'Verify bundle', import: 'Import', publish: 'Publish', installer: 'Build offline installer' };
 
 function blobDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);

@@ -178,3 +178,4 @@ code { overflow-wrap: anywhere; }
 .dc-choice-body ul { margin: 6px 0 0; padding-inline-start: 18px; list-style: disc; }
 .dc-choice-extra { display: grid; gap: 12px; margin: 0 0 16px; }
 .dc-setup-note { margin: 0 0 16px; }
+.dc-installer-actions { margin: 14px 0 6px; }

@@ -16,11 +16,12 @@ const jobSteps: Record<string, [string, string][]> = {
   export: [['bundle', 'Build bundle'], ['verify', 'Verify bundle']],
   'verify-export': [['verify', 'Verify bundle']],
   preflight: [['space', 'Check repository sizes']],
+  installer: [['fetch', 'Get packages'], ['deps', 'Download dependencies'], ['verify', 'Check signatures'], ['repo', 'Index repository'], ['archive', 'Write & verify']],
 };
 const runningTitles: Record<string, string> = { 'sync-export': 'Syncing & building bundle…', sync: 'Syncing…', export: 'Building bundle…',
-  'verify-export': 'Verifying bundle…', preflight: 'Checking repository sizes…' };
+  'verify-export': 'Verifying bundle…', preflight: 'Checking repository sizes…', installer: 'Building offline installer…' };
 const failureTitles: Record<string, string> = { 'sync-export': 'Sync & build failed', sync: 'Sync failed', export: 'Bundle build failed',
-  'verify-export': 'Bundle verification failed', preflight: 'Size check failed' };
+  'verify-export': 'Bundle verification failed', preflight: 'Size check failed', installer: 'Installer build failed' };
 
 function exportLabel(bundle?: ExportRecord | null) {
   if (!bundle) return 'Not bundled';
@@ -124,6 +125,7 @@ export function ConnectedOverview({ ctx }: { ctx: Ctx }) {
           <td>{repo.repository ? bytes(repo.repository.package_bytes) : '—'}</td>
           <td><Ago value={repo.synced_at} /></td></tr>)}</tbody></table></div>
     </CardBody></Card>}
+    <OfflineInstaller ctx={ctx} />
     {older.length > 0 && <details className="dc-details dc-card-details"><summary>Older snapshots ({older.length})</summary>
       {older.map(item => <div className="dc-row" key={item.id}><div><strong><Timestamp value={item.created} /></strong>
         <span className="dc-muted">{plural(Object.keys(item.repositories).length, 'repository', 'repositories')} · {bytes(item.package_bytes)} · {exportLabel(item.export)}</span>
@@ -135,6 +137,32 @@ export function ConnectedOverview({ ctx }: { ctx: Ctx }) {
     </details>}
     <StorageLine state={state} />
   </>;
+}
+
+/** Packages this extension and its dependencies so a disconnected host can install it offline. */
+function OfflineInstaller({ ctx }: { ctx: Ctx }) {
+  const { state, busy, active } = ctx;
+  const installer = state.installer;
+  const last = state.jobs.find(job => job.operation === 'installer');
+  const failed = last && ['failed', 'cancelled', 'interrupted'].includes(last.status) && (!installer || last.created > installer.created) ? last : undefined;
+  const running = active?.operation === 'installer';
+  const ready = installer?.state === 'available';
+  return <Card><CardTitle>Offline installer for the disconnected host</CardTitle><CardBody>
+    <p className="dc-muted">One file with this extension and everything it needs, so a disconnected RHEL {state.os.major} {state.os.arch} host
+      can install it without network access. The disconnected host must run the same RHEL release and architecture as this one.</p>
+    {failed && <Alert variant="danger" isInline title={failureTitles.installer}>{failed.stage}</Alert>}
+    {installer && !ready && <Alert variant="warning" isInline isPlain title={installer.reason} />}
+    {ready && <>
+      <div className="dc-files" aria-label="Installer files"><CopyPath path={installer.path} ctx={ctx} /><CopyPath path={installer.checksum_path} ctx={ctx} /></div>
+      <p className="dc-muted">Built <Ago value={installer.created} /> · {bytes(installer.bytes)} · {plural(installer.dependencies, 'dependency package')} ·
+        for RHEL {installer.target.major} {installer.target.arch}. On the disconnected host, unpack it and run <code>sudo ./install.sh --with-publisher</code>.</p></>}
+    <div className="dc-actions dc-installer-actions">
+      <Button variant={ready ? 'secondary' : 'primary'} isDisabled={busy || Boolean(active)} isLoading={running || undefined}
+        onClick={() => { void ctx.start('installer'); }}>{running ? 'Building…' : installer ? 'Build installer again' : 'Build offline installer'}</Button>
+    </div>
+    <p className="dc-muted">Gets this version's packages from its GitHub release, or from the transfer folder if you copied them there.
+      Dependencies come from this host's repositories, and their signatures are checked.</p>
+  </CardBody></Card>;
 }
 
 export function Repositories({ ctx }: { ctx: Ctx }) {

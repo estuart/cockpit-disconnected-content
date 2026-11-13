@@ -7,6 +7,11 @@ import { createServer } from 'node:http';
 const dashboards = JSON.parse(execFileSync('python3', ['scripts/dashboard-fixtures.py'], { encoding: 'utf8' }));
 const connected = dashboards.ready;
 const firstRun = dashboards.setup;
+const withInstaller = dashboards['installer-ready'];
+for (const state of [withInstaller]) {
+  state.connected.latest_export.bytes = 91033600;
+  state.snapshots[0].export.bytes = 91033600;
+}
 const disconnected = JSON.parse(execFileSync('python3', ['scripts/disconnected-fixtures.py'], { encoding: 'utf8' }))['disconnected-clients'];
 const signing = JSON.parse(execFileSync('python3', ['scripts/signing-key-fixtures.py'], { encoding: 'utf8' }));
 // Fixed demo time avoids screenshots that grow stale every day.
@@ -53,9 +58,17 @@ try {
   const setupPage = await pageFor(firstRun);
   await setupPage.page.getByRole('radio', { name: /^Disconnected host/ }).check();
   await expect(setupPage.page.getByRole('button', { name: 'Set up as a disconnected host', exact: true })).toBeEnabled();
+  await setupPage.page.waitForTimeout(500); // Let the button finish its enabled-state transition.
   await setupPage.page.screenshot({ path: `${output}/first-run-setup.png`, fullPage: true });
   expect(setupPage.errors).toEqual([]);
   await setupPage.page.close();
+
+  const installerPage = await pageFor(withInstaller);
+  const card = installerPage.page.locator('.pf-v6-c-card').filter({ hasText: 'Offline installer for the disconnected host' });
+  await expect(card.getByLabel('Installer files', { exact: true })).toBeVisible();
+  await card.screenshot({ path: `${output}/offline-installer.png` });
+  expect(installerPage.errors).toEqual([]);
+  await installerPage.page.close();
 
   const connectedPage = await pageFor(connected);
   await expect(connectedPage.page.getByText('✓ Bundle ready to transfer', { exact: true })).toBeVisible();
@@ -90,7 +103,7 @@ try {
   await keysPage.page.screenshot({ path: `${output}/client-automation.png`, fullPage: true });
   expect(keysPage.errors).toEqual([]);
   await keysPage.page.close();
-  console.log('Nine documentation screenshots captured from generic frontend fixtures');
+  console.log('Ten documentation screenshots captured from generic frontend fixtures');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

@@ -469,3 +469,119 @@ Python, which on RHEL 8 is 3.6. The helper reads each repository's key sources f
 - **Not tested here.** Containers don't run systemd, SELinux, or Cockpit, so the job
   service, the web console, and a full sync, import, and publish on RHEL 8 and 9 are
   left for lab validation.
+
+## Offline installer
+
+Version 0.12.0 adds an offline installer that the connected host builds for a
+disconnected host of the same RHEL release and architecture. It contains this
+version's RPMs, the dependency closure, repository metadata, `SHA256SUMS`, a
+README, and `install.sh`.
+
+- **Backend tests** cover:
+  - the archive layout, root ownership, and the executable `install.sh`;
+  - `SHA256SUMS` matching every member, and the sidecar matching the archive;
+  - the `install.sh` template being fully filled in;
+  - DNF resolving from an empty install root with the host's release version;
+  - signature checks on every dependency;
+  - downloads from the fixed release URL being checked against `SHA256SUMS`, and
+    a mismatch rejected;
+  - an unreachable GitHub naming the transfer-folder fallback;
+  - RPM headers that don't match their file names being rejected;
+  - a missing `createrepo_c` being explained;
+  - no partial files left after a failure;
+  - the summary noticing a moved or changed installer;
+  - the build being limited to connected hosts;
+  - an installer name never matching the import scanner's bundle pattern.
+- **Browser tests** render the installer card ready, running, and failed. They
+  check the build request, and that a failed installer doesn't take over the main
+  bundle workflow.
+- **End to end in containers** (aarch64), with RPMs built from this branch on each
+  release. In a connected container, the job ran directly, with the RPMs in the
+  transfer folder. A fresh container of the same release, with networking
+  disabled, then ran `install.sh --with-publisher`:
+
+  | Release | Dependencies | Archive | Installed offline | Helper |
+  | --- | --- | --- | --- | --- |
+  | AlmaLinux 8.10 | 210 | 119 MiB | 62 packages, including `python3.12` and the `httpd` module | Python 3.12 |
+  | AlmaLinux 9 | 192 | 84 MiB | 43 packages | Python 3.9 |
+  | CentOS Stream 10 | 181 | 85 MiB | 53 packages | Python 3.12 |
+
+  - **Signatures and status:** DNF imported the distribution key and checked every
+    dependency. On each release, `status` then reported 0.12.0 with no role and the
+    publisher present.
+  - **RHEL 8 modules:** the first RHEL 8 run found that DNF refuses modular
+    packages such as `httpd` from a repository without module metadata, so
+    `install.sh` now sets `module_hotfixes` on its local repository. The connected
+    host already resolved those packages from its default module streams.
+  - **Tampering:** after one dependency RPM was changed, `install.sh` stopped at the
+    `SHA256SUMS` check before running DNF.
+- **Not tested here:** containers don't run systemd, so `install.sh` couldn't start
+  `cockpit.socket` there, and the job ran without its service unit. The job
+  service, a GitHub download of a published release, and real RHEL hosts with
+  subscription-managed repositories are left for lab validation.
+
+## Lab validation for 0.12.0
+
+This lab run used RPMs built from the branch on the toughbook (RHEL 10.2), the
+disconnected lab VM (RHEL 10.2), and a RHEL 8.10 VM. Each had SELinux enforcing,
+and Cockpit sessions were reached through SSH tunnels.
+
+**Connected host, RHEL 10.2.** It was registered, with ten repositories enabled,
+including EPEL, RPM Fusion, Docker, HashiCorp, and Tailscale.
+- **Upgrade from 0.11.0.** The edited configuration (custom `state_dir`) was kept,
+  and the new default was written to `config.json.rpmnew`. Status reported 0.12.0,
+  connected and ready, and the job unit passed `systemd-analyze verify`.
+- **First-run setup.** With the role removed, status suggested connected because of
+  16 existing snapshots. In a live Cockpit 356 session, the setup step showed the
+  hint with Connected pre-selected. **Set up as a connected host** switched straight
+  to "✓ Bundle ready to transfer". The configuration kept `state_dir`, gained a
+  timestamped backup, and stayed `root:root 0644`.
+- **Offline installer under its systemd unit.**
+  - The first build failed at the fetch step, as expected: there's no v0.12.0
+    release yet, so GitHub returned 404, and the message named both RPMs and the
+    transfer folder to copy them into.
+  - With the RPMs in that folder, the second build finished in 38 seconds, using
+    the subscription-managed repositories through the empty install root: 182
+    dependencies in an 87 MiB archive.
+  - Despite the third-party repositories, every dependency came from Red Hat and
+    was signed with key `199e2f91fd431d51`.
+
+**Disconnected host, RHEL 10.2.** No default route. It ran 0.11.0 with the publisher
+and was publishing to clients.
+- **Transfer.** The installer reached the host through the workstation, and its
+  checksum matched at every hop.
+- **Offline upgrade.** `install.sh --with-publisher` upgraded both packages and
+  installed only `createrepo_c` and the one library it needs from the installer's
+  repository, with GPG checks on.
+- **After the upgrade.** The edited configuration was kept (with
+  `config.json.rpmnew`), the publication stayed available, `cockpit.socket` and
+  `httpd` stayed active, and the unit verified.
+
+**Upgrade from an unmodified configuration.** Tested in a CentOS Stream 10
+container, installing the published v0.11.0 RPM and then the 0.12.0 build. RPM
+replaced the old default with the role-less one, status suggested connected from
+an existing export record, and `setup connected` restored the role.
+
+**RHEL 8.10 VM.**
+- **Install.** The `.el8` package installed `python3.12`, `createrepo_c`, and
+  `zstd` from AppStream, and no Apache. The helper ran on Python 3.12, and
+  `systemd-analyze verify` passed with no warnings: systemd on RHEL 8.10 accepts
+  the unit's `Type=exec` and `RestrictSUIDSGID`.
+- **Setup in Cockpit 310.** The setup step rendered correctly inside the older
+  Cockpit 310 shell, with no hint, and set the connected role.
+- **Sync and bundle.** On a temporary local repository of three Red Hat packages,
+  the job (size check, `reposync`, RPM 4.14 signature checks, and key collection
+  through `dnf config-manager --dump`) bundled both Red Hat key blocks and verified
+  the export.
+  - The first attempt failed because the test repository was under `/var/tmp`,
+    which the job service can't see (`PrivateTmp`). That is now in the
+    troubleshooting table.
+- **Offline installer.** The build resolved 211 dependencies (122 MiB), including
+  four modular `httpd` packages. All came from Red Hat, signed with `199e2f91fd431d51`,
+  even with EPEL enabled.
+
+**Not covered in the lab:**
+- RHEL 9 on a real host (packages are tested in AlmaLinux 9 containers);
+- a fresh offline install on a real VM with no Cockpit (tested in containers on all
+  three releases);
+- the installer's GitHub download path with a published release.

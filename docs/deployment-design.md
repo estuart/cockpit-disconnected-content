@@ -67,5 +67,11 @@ The current main package includes DNF tooling on both sides; no dependency split
 is being claimed here. Small role metapackages could eventually simplify fleet
 installation, but separate application builds are not needed for this prototype.
 
-Metapackages, a bootstrap-media builder, a `state_dir` migration, and role
-migration are proposals. This documentation does not introduce them.
+Disconnected hosts can be installed from an offline installer that the connected
+host builds. It contains this version's RPMs and the dependency closure for a
+fresh host of the same RHEL release and architecture, with repository metadata,
+`SHA256SUMS`, and an `install.sh` that installs only missing packages with DNF
+signature checks. See [the installation guide](installation.md#offline-installer-recommended).
+
+Metapackages, a `state_dir` migration, and role migration are proposals. This
+documentation does not introduce them.

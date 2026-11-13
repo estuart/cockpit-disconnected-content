@@ -78,9 +78,9 @@ dependency license notices.
 
 Releases are built by `.github/workflows/release.yml`, not on a workstation.
 
-1. Set the new version in all five places: `package.json`, `Makefile`,
-   `backend/disconnected_content.py`, `scripts/release.py`, and the spec's
-   `Version`. Add a `%changelog` entry to the spec. The first entry becomes the
+1. Set the new version in all six places: `package.json`, `src/manifest.json`,
+   `Makefile`, `backend/disconnected_content.py`, `scripts/release.py`, and the
+   spec's `Version`. Add a `%changelog` entry to the spec. The first entry becomes the
    release notes.
 2. Merge the change to `main`.
 3. Tag the merge commit and push the tag:
@@ -90,7 +90,7 @@ Releases are built by `.github/workflows/release.yml`, not on a workstation.
    git push origin v0.12.0
    ```
 
-The workflow fails if the tag and the five version strings disagree. It builds the
+The workflow fails if the tag and the six version strings disagree. It builds the
 frontend and source archive once, then builds the RPMs on AlmaLinux 8, AlmaLinux 9,
 and CentOS Stream 10. Each release's packages are installed in a clean container of
 that release:
